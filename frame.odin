@@ -165,3 +165,19 @@ Connection_Close_Frame :: union {
 Handshake_Done_Frame :: struct {
     type: int = 0x1e `serialize:"variable_length_int"`,
 }
+
+Datagram_No_Len_Frame :: struct {
+    type: int = 0x30 `serialize:"variable_length_int"`,
+    data: []byte,
+}
+
+Datagram_With_Len_Frame :: struct {
+    type: int = 0x31 `serialize:"variable_length_int"`,
+    length: int `serialize:"variable_length_int"`,
+    data: []byte,
+}
+
+Datagram_Frame :: union {
+    Datagram_No_Len_Frame,
+    Datagram_With_Len_Frame,
+}
