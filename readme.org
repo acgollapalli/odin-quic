@@ -1,0 +1,13 @@
+#+TITLE: README
+
+* QUIC in Odin
+Quic implementations are coming along very slowly. So here's a VERY VERY VERY WIP implementation in Odin.
+
+** How to use this library
+You cannot use it yet. It is not at all done.
+
+** Why?
+Because I can, or at least I think I can.
+
+** Can I help?
+Sure, if you want. 
