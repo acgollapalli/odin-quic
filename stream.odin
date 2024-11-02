@@ -9,13 +9,13 @@ Stream :: union {
 
 Sending_Stream :: struct {
     id: u64,
-    limit: int,
+    limit: u64,
     sending_state: Sending_Stream_State,
 }
 
 Receiving_Stream :: struct {
     id: u64,
-    limit: int,
+    limit: u64, // FIXME: Version 1 only allows limits in a 62 bit uint
     receiving_state: Receiving_Stream_State,
 }
 

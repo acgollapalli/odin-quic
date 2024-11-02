@@ -1,5 +1,55 @@
 package quic
 
+Frame :: union {
+    Padding_Frame,
+    Ping_Frame,
+    Ack_Frame,
+    Reset_Stream_Frame,
+    Stop_Sending_Frame,
+    Crypto_Frame,
+    New_Token_Frame,
+    Stream_Frame,
+    Max_Data_Frame,
+    Max_Stream_Data_Frame,
+    Max_Streams_Frame,
+    Data_Blocked_Frame,
+    Stream_Data_Blocked_Frame,
+    Streams_Blocked_Frame,
+    New_Connection_Id_Frame,
+    Retire_Connection_Id_Frame,
+    Path_Challenge_Frame,
+    Path_Response_Frame,
+    Connection_Close_Frame,
+    Handshake_Done_Frame,
+    Datagram_Frame,
+}
+
+// FIXME: This is probably unnecessary and overcomplicated
+// but it helps me to see it here. 
+//Frame_Type_Codes :: [Frame_Type][]? {
+//	.Padding                  = { 0x00 },
+//	.Ping                     = { 0x01 },
+//	.Ack                      = { 0x02, 0x03 },
+//	.Reset_Stream             = { 0x04 },
+//	.Stop_Sending             = { 0x05 },
+//	.Crypto                   = { 0x06 },
+//	.New_Token                = { 0x07 },
+//	.Stream                   = { 0x08, 0x0f },
+//	.Max_Data                 = { 0x10 },
+//	.Max_Stream_Data          = { 0x11 },
+//	.Max_Streams              = { 0x12, 0x13 },
+//	.Data_Blocked             = { 0x14 },
+//	.Stream_Data_Blocked      = { 0x15 },
+//	.Streams_Blocked          = { 0x16, 0x17 },
+//	.New_Connection_Id        = { 0x18 },
+//	.Retire_Connection_Id     = { 0x19 },
+//	.Path_Challenge           = { 0x1a },
+//	.Path_Response            = { 0x1b },
+//	.Connection_Close         = { 0x1c, 0x1d },
+//	.Handshake_Done           = { 0x1e },
+//	.Datagram                 = { 0x30, 0x31 },
+//}
+
 Padding_Frame :: struct {
     type: int = 0 `serialize:"variable_length_int"`,
 }
@@ -181,3 +231,5 @@ Datagram_Frame :: union {
     Datagram_No_Len_Frame,
     Datagram_With_Len_Frame,
 }
+
+

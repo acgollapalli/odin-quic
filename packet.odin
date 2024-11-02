@@ -9,86 +9,74 @@ Packet :: union {
     One_RTT_Packet,
 }
 
+Packet_Type :: enum {
+    Version_Negotiation,
+    Initial,
+    Zero_RTT,
+    Handshake,
+    Retry,
+    One_RTT,
+}
+
+Allowed_Frames :: [Packet_Type]bit_set[Frame_type]
+
 // NOT sure how we're going to ensure this get's
 // serialized in the format we're sending it int
-// but... maybe the #packed thing will be enough
+// but... maybe the thing will be enough
 //
 // UPDATE: bit fields MAY be the answer, but I am
 // not sure that they are compatible. Evidently
 // They are least-significant bit and network
 // packets must be big-endian... I know these words
-Version_Negotiation_Packet :: struct #packed {
-    first_byte: u8,
+Version_Negotiation_Packet :: struct {
     version: u32, // version is 0 in case of negotiation
-    dest_conn_id_length: u64,
-    dest_conn_id: []u64,
-    source_conn_id_length: u64,
-    source_conn_id: []u64,
-    type-specific-payload: []u8
-    supported_version: u32
+    dest_conn_id: Connection_Id,
+    source_conn_id: Connection_Id,
+    supported_versions: []u32
 }
 
-Initial_Packet :: struct #packed {
-    first_byte: u8,
+Initial_Packet :: struct {
     version: u32,
-    dest_conn_id_length: u64,
-    dest_conn_id: []u64,
-    source_conn_id_length: u64,
-    source_conn_id: []u64,
-    token_length: u64,             // variable length
+    dest_conn_id: Connection_Id,
+    source_conn_id: Connection_Id,
     token: []u8,
-    length: u64,                   // variable length
     packet_number: u32,
     packet_payload: []u8
 }
 
-Zero_RTT_Packet :: struct #packed {
-    first_byte: u8,
+Zero_RTT_Packet :: struct {
     version: u32, // version is 0 in case of negotiation
-    dest_conn_id_length: u64,
-    dest_conn_id: []u64,
-    source_conn_id_length: u64,
-    source_conn_id: []u64,
-    type-specific-payload: []u8
-    length: u64,                   // variable length
+    dest_conn_id: Connection_Id,
+    source_conn_id: Connection_Id,
     packet_number: u32,
     packet_payload: []u8
 }
 
-Handshake_Packet :: struct #packed {
-    first_byte: u8,
+Handshake_Packet :: struct {
     version: u32, // version is 0 in case of negotiation
-    dest_conn_id_length: u64,
-    dest_conn_id: []u64,
-    source_conn_id_length: u64,
-    source_conn_id: []u64,
-    type-specific-payload: []u8,
-    length: u64,                   // variable length
+    dest_conn_id: Connection_Id,
+    source_conn_id: Connection_Id,
     packet_number: u32,
     packet_payload: []u8
 }
 
 
-/* #packed may not be necessary, as there will
+/* may not be necessary, as there will
    need to be some work to serialize this anyway */
-Retry_Packet :: struct #packed {
-    first_byte: u8,
+Retry_Packet :: struct {
     version: u32,
-    dest_conn_id_length: u64,
-    dest_conn_id: []u64,
-    source_conn_id_length: u64,
-    source_conn_id: []u64,
-    type-specific-payload: []u8,
-    length: u64,                  // variable length
+    dest_conn_id: Connection_Id,
+    source_conn_id: Connection_Id,
     retry_token: []u8,
-    retry_integrity_tag: u128
+    retry_integrity_tag: [16]u8
 }
 
 
 // SPIN BIT HAS SUPERPOWERS
-One_RTT_Packet :: struct #packed {
-    first_byte: u8,
-    dest_conn_id: []u64,
+One_RTT_Packet :: struct {
+    spin_bit: bool,
+    key_phase: bool,
+    dest_conn_id: Connection_Id,
     packet_number: u32,
     packet_payload: []u8
 }
@@ -101,7 +89,7 @@ One_RTT_Packet :: struct #packed {
 
 /* we could optimize this by inlining/hardcoding instead
    of having this be a whole procedure */
-get_first_byte :: proc(packet: Packet, spin: bool, key_phase: bool) -> u8 {
+make_first_byte :: proc(packet: Packet, spin: bool, key_phase: bool) -> u8 {
     header_form := 1 << 7
     fixed_bit := 1 << 6
 
