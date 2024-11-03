@@ -1,5 +1,7 @@
 package quic
 
+import "core:sync"
+
 Connection_Id :: union {
     uuid.UUID,
     []u8
@@ -34,6 +36,8 @@ Conn :: struct {
     spin_enabled: bool, // enables latency tracking in 1-rtt streams
     source_conn_ids: []Connection_Id, 
     destination_conn_ids: []Connection_Id,
+    lock: sync.Mutex // FIXME: I think we could use a futex here? or atomics
+    encryption: Encryption_Context
 }
 
 // TODO: 
@@ -46,8 +50,3 @@ Unmatched_Packet :: struct {
     timestamp: time.Time
 }
 
-Context :: struct {
-    known_connections: map[net.Endpoint][]Conn,
-    unmatched_packets: [dynamic]Unmatched_Packet // FIXME: THIS IS NOT threadsafe
-    // FIXME: Add atomic adds to unmatched_packets
-}

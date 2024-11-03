@@ -1,14 +1,51 @@
 package quic
 
+Partial_Packet :: struct {
+    first_byte: byte,
+    version: u32,
+    dest_conn_id: Connection_id,
+    src_conn_id: Connection_Id,
+}
+
+
+handle_datagram :: proc(dg: []byte, ctx: Context) {
+    if len(dg) < 1280 {
+	return
+    }
+
+    packets := [dynamic]Packet
+    defer delete(packets)
+    dg := dg
+
+    dest_conn_id : Connection_id
+
+    for len(dg) > 0 { // FIXME: how do we handle cases where we don't have enough for a full packet?
+	packet, dg, err := process_incoming_packet(db, ctx) or_return // FIXME: we're just passing the error up
+
+	if dest_conn_id == nil {
+	    dest_conn_id = packet.dest_conn_id
+	    append(&packets, packet)
+	} else if dest_conn_id == packet.dest_conn_id  {
+	    append(&packets, packet) // FIXME: instead of appending to a dynamic array, we should just handle the packet
+	}
+    }
+}
+
 
 // handle incoming packet
 // FIXME: we should be using core:bytes reader here
-// FIXME: I THINK we have the Endpoint of the peer from UDP
-// MAYBE we should use that in matching via context
-// FIXME: We need to handle the case of MULTIPLE packets in a single datagram. ALL of them need to have the same dest_id
-handle_incoming_packet :: proc(packet: []byte) ->  (Packet, []byte, Transport_Error) {
-    // what kind of thing are we working with
-    packet_type, err = what_kind_of_packet(packet) or_return
+process_incoming_packet :: proc(packet: []byte, ctx: Context) ->  (Packet, []byte, Transport_Error) {
+    packet := packet // let's mutate the slice as we iterate
+
+    /* This is under header protection
+       and we can't read the latter half of it yet
+       however we can find out what kind of thing we're working with */
+    first_byte := packet[0] 
+    packet_type = what_kind_of_packet(first_byte)
+    packet = packet[1:]
+    version : u32 // 1-RTT packets don't have this, so we don't know if this is defined
+    
+
     dest_conn_id_len : u8
     src_conn_id_len: u8
     dest_conn_id : Connection_Id // maybe we --- this?
@@ -18,217 +55,65 @@ handle_incoming_packet :: proc(packet: []byte) ->  (Packet, []byte, Transport_Er
 	// we always return conn_ids as uuids
 	// uuid's are encoded in 16 bytes
 	dest_conn_id_len = 16
-	Connection_Id, err = uuid.read(string(packet[1:17]))
-	if err {
-	    // we couldn't read the ID, which means
-	    // that they're using an ID we didn't issue
-	    // in what SHOULD be an authenticated packet
-	    // FIXME: This might be the wrong error
-	    // MAYBE: we should just drop the packet
-	    // UPDATE: We should only see this if a packet
-	    // is in the same datagram as an initial packet
-	    // which should create a conn in the address
-	    // validation state or similar.
-	    return nil, nil, .PROTOCOL_VIOLATION // just drop the packet... although error frames require an error message. We may need to do better than this
-	}
+	Connection_Id, packet[0:16]
+	packet = packet[16:]
     } else {
+	// get version
+	for b in packet[0:4] {
+	    version = (u32)b + (version << 8)
+	}
+	packet = packet[4:]
+
 	// get the length of the connection id
-	dest_conn_id_len = packet[5]
+	dest_conn_id_len = packet[0]
+	packet = packet[1:]
 
 	// for v1 of QUIC, dest_conn_ids must be < 20
 	if dest_conn_id_len > 20 && packet_type != .Version_Negotiation {
 	    return nil, nil, .VERSION_NEGOTIATION_ERROR
 	} else {
-	    idx := 6+dest_conn_id_len
-	    dest_conn_id = packet[6:idx]
+	    dest_conn_id = packet[0:dest_conn_id_len]
+	    packet = packet[dest_conn_id_len:]
 
-	    src_conn_id_ln = packet[idx]
 	    if src_conn_id_len > 20 && packet_type != .Version_Negotiation {
 		// ONLY holds for version 1 and 2 at the moment
 		return nil, nil, .PROTOCOL_VIOLATION
 	    }
-	    idx += 1
-	    src_conn_id = packet[idx: idx + src_conn_id_ln]
+	    src_conn_id = packet[0: src_conn_id_len]
+	    packet = packet[src_conn_id_len:]
 	}
     }
 
+    /*
+     * We've about reached the point where we can read anything that's unprotected
+     * and common to all the packet types. The way we decrypt packet types is unique
+     * to each packet type, so we've got handlers for each one.
+     */
 
-    packet := packet // let's mutate the slice as we iterate
+    partial_packet = Partial_Packet{
+	first_byte = first_byte,
+	version = version,
+	dest_conn_id = Connection_Id,
+	src_conn_id = Connection_Id,
+    }
 
     switch packet_type {
     case .Initial:
-	packet_number_length := packet[0] & 0x03 // last two bits
-
-	packet = packet[1:]
-	version := get_version(packet)
-	packet = packet[4:]
-
-	// we know the dest_conn_id and src_conn_id
-	conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
-	packet = packet[conn_idx:]
-
-	token_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:]
-	
-	token := packet[:token_length]
-	packet = packet[token_length:]
-
-	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:] // FIXME: Maybe the function can do this part?
-
-	packet_number: u32
-	pkt_idx := ln_idx + length
-	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	    packet_number = (u32)b + (packet_number << 8)
-	}
-	packet = packet[packet_number_length:]
-
-	packet_payload := packet[:payload_length]
-	packet = packet[packet_payload_length:]
-
-	return Initial_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    packet_number: packet_number,
-	    token: token,
-	    packet_payload: packet_payload,
-	}, packet, nil
-
+	return process_initial(partial_packet, packet)
     case .Handshake:
-	packet_number_length := packet[0] & 0x03 // last two bits
-	packet = packet[1:]
-
-	version := get_version(packet)
-	packet = packet[4:]
-
-	// we know the dest_conn_id and src_conn_id
-	conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
-	packet = packet[conn_idx:]
-
-	length, offset := get_variable_length_int(packet)
-	packet = packet[offset:]
-
-	packet_number: u32
-	pkt_idx := ln_idx + length
-	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	    packet_number = (u32)b + (packet_number << 8)
-	}
-	packet = packet[packet_number_length:]
-
-	packet_payload := packet[:packet_payload_length]
-	packet = packet[packet_payload_length:]
-
-	return Handshake_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    packet_number: packet_number,
-	    packet_payload: packet_payload
-	}, packet, nil
+	return process_handshake(partial_packet, packet, ctx)
     case .Retry:
-	tk_idx := 13 + conn_id_len + 8 + src_conn_id_len
-	tk_end := len(packet) - 16  // integrity tag is 128 bits
-	return Retry_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    retry_token: packet[tk_idx : tk_end],
-	    retry_integrity_tag: packet[tk_end:],
-	}, nil, nil
+	return process_retry(partial_packet, packet, ctx)
     case .Version_Negotiation:
-	packet = packet[1:]
-
-	version := get_version(packet)
-	packet = packet[4:]
-
-	// we know the dest_conn_id and src_conn_id
-	conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
-	packet = packet[conn_idx:]
-
-	versions: [dynamic]u32
-	for len(packet) >= 8 {
-	    append(versions, packet[:8])
-	    packet = packet[8:]
-	}
-
-	return Version_Negotiation_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    supported_versions: versions
-	}, nil, nil
+	return process_version_negotiation(partial_packet, packet, ctx)
     case .Zero_RTT:
-	packet = packet[1:]
-
-	version := get_version(packet)
-	packet = packet[4:]
-
-	// we know the dest_conn_id and src_conn_id
-	conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
-	packet = packet[conn_idx:]
-
-	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:] // FIXME: Maybe the function can do this part?
-
-	packet_number: u32
-	pkt_idx := ln_idx + length
-	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	    packet_number = (u32)b + (packet_number << 8)
-	}
-	packet = packet[packet_number_length:]
-
-	packet_payload := packet[:payload_length]
-	packet = packet[packet_payload_length:]
-
-	return Zero_RTT_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    packet_number: packet_number,
-	    packet_payload: packet_payload,
-	}, packet, nil
+	return process_zero_rtt(partial_packet, packet, ctx)
     case One_RTT:
-	spin_bit = packet[0] & (1 << 5)
-	key_phase = packet[0] & (1 << 2)
-
-	packet = packet[1:]
-
-	// we know the dest_conn_id and src_conn_id
-	conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
-	packet = packet[conn_idx:]
-
-	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:] // FIXME: Maybe the function can do this part?
-
-	packet_number: u32
-	pkt_idx := ln_idx + length
-	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	    packet_number = (u32)b + (packet_number << 8)
-	}
-	packet = packet[packet_number_length:]
-
-	packet_payload := packet[:payload_length]
-	packet = packet[packet_payload_length:]
-
-	return One_RTT_Packet{
-	    spin_bit: spin_bit,
-	    key_phase: key_phase,
-	    dest_conn_id: dest_conn_id,
-	    packet_number: packet_number
-	}, packet, nil
+	return process_one_rtt(partial_packet, packet, ctx)
     }
 }
 
-get_version :: proc(version_bytes: []byte) -> u32 {
-    version: u32
-	for b in version_bytes {
-	    version = (u32)b + (version << 8)
-	}
-    return version
-}
-
-get_variable_length_int :: proc(packet: []byte) -> (n: int, len: int) {
+get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
     2msb := packet[0] >> 6
     n = packet[0] & ~(2 << 6)
 
@@ -250,45 +135,196 @@ get_variable_length_int :: proc(packet: []byte) -> (n: int, len: int) {
     return
 }
 
-what_kind_of_packet :: proc(packet: []byte) -> (Packet_Type, Transport_Error) {
-    first_byte := packet[0]
+what_kind_of_packet :: proc(first_byte: byte) -> Packet_Type {
     is_long_header := first_byte & (1 << 7) // first bit
     is_fixed_bit := first_byte & (1 << 6)    // second bit
-    version : u32 // only one version right now, we're just getting it out of the way
-    conn_id_length : u64a
 
     // getting the conn_id_length (see packet.odin)
     if is_long_header {
 	if is_fixed_bit {
-	    return handle_version_negotiation(packet)
+	    return .Version_Negotiation
 	} else {
-	    return handle_long_header(packet)
+            first_byte := first_byte
+	    first_byte = first_byte << 2
+            first_byte = first_byte >> 6
+
+            // first byte now only has bits 5 and 6
+            // long header packets are 0x01 through 0x03
+            // and are enumerated in Packet_Type as 1-4
+            return (Packet_Type)(first_byte + 1)
 	}
-	
     } else {
-	return .One_RTT, nil
+	return .One_RTT
     }
 }
 
-// FIXME: Only version 1 of QUIC is supported at the moment
-handle_version_negotiation ::proc (packet: []byte) {
-    version := get_version(packet[1:5])
 
-    if version != 0 {
-	fmt.println("version was not 0 on version negotiation packet")
-	return nil, .PROTOCOL_ERROR
-    } else {
-	return .Version_Negotiation, nil
-    }
+// retrieve the conn object
+retrieve_conn :: proc(ctx: Context, packet: []byte) -> Conn {
+    
+
 }
 
-handle_long_header :: proc (packet: []byte) {
-    first_byte := packet[0]
-    first_byte = first_byte << 2
-    first_byte = first_byte >> 6
+process_initial :: proc(using partial: Partial_Packet, packet: []u8) -> (Packet, []u8, Transport_Error) {
+    // FIXME: Remove packet protection HERE
+    // FIXME: Should we be decrypting packet protection here?
+    packet := packet
+    token_length, offset := get_variable_length_int(packet)
+    packet = packet[offset:]
+    
+    token := packet[:token_length]
+    packet = packet[token_length:]
+    
+    payload_length, offset := get_variable_length_int(packet)
+    packet = packet[offset:] // FIXME: Maybe the function can do this part?
+    
+    packet_number: u32
+    pkt_idx := ln_idx + length
+    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
+	packet_number = (u32)b + (packet_number << 8)
+    }
+    packet = packet[packet_number_length:]
+    
+    packet_payload := packet[:payload_length]
+    packet = packet[packet_payload_length:]
+    
+    return Initial_Packet{
+	version = version,
+	dest_conn_id = dest_conn_id,
+	source_conn_id = src_conn_id,
+	packet_number = packet_number,
+	token = token,
+	packet_payload = packet_payload,
+    }, packet, nil
+}
 
-    // first byte now only has bits 5 and 6
-    // long header packets are 0x01 through 0x03
-    // and are enumerated in Packet_Type as 1-4
-    return first_byte + 1, nil
+process_handshake :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
+    // FIXME: Remove packet protection HERE
+    // FIXME: Should we be decrypting packet protection here?
+    length, offset := get_variable_length_int(packet)
+    packet = packet[offset:]
+    
+    packet_number: u32
+    pkt_idx := ln_idx + length
+    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
+	packet_number = (u32)b + (packet_number << 8)
+    }
+    packet = packet[packet_number_length:]
+    
+    packet_payload := packet[:packet_payload_length]
+    packet = packet[packet_payload_length:]
+    
+    return Handshake_Packet{
+	version: version,
+	dest_conn_id: dest_conn_id,
+	source_conn_id: src_conn_id,
+	packet_number: packet_number,
+	packet_payload: packet_payload
+    }, packet, nil
+}
+
+process_retry :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
+    // FIXME: Verify there isn't any header protection on retry
+    // FIXME: Verify packet protection on  retry
+    tk_end := len(packet) - 16  // integrity tag is 128 bits
+    return Retry_Packet{
+	version: version,
+	dest_conn_id: dest_conn_id,
+	source_conn_id: src_conn_id,
+	retry_token: packet[0 : tk_end],
+	retry_integrity_tag: packet[tk_end:],
+    }, nil, nil // retry ends the datagram
+}
+
+
+process_version_negotiation :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
+    // FIXME: Verify there isn't any header protection on version negotiation
+    // FIXME: Verify packet protection on version negotiation
+
+    if (version != 0) {
+	return nil, nil, .VERSION_NEGOTIATION_ERROR
+    }
+
+    versions: [dynamic]u32
+    for len(packet) >= 8 {
+	append(versions, packet[:8])
+	packet = packet[8:]
+    }
+    
+    return Version_Negotiation_Packet{
+	version: version,
+	dest_conn_id: dest_conn_id,
+	source_conn_id: src_conn_id,
+	supported_versions: versions
+    }, nil, nil // version negotiation ends the datagam
+}
+
+process_zero_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
+    	payload_length, offset := get_variable_length_int(packet)
+	packet = packet[offset:] // FIXME: Maybe the function can do this part?
+
+	packet_number: u32
+	pkt_idx := ln_idx + length
+	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
+	    packet_number = (u32)b + (packet_number << 8)
+	}
+	packet = packet[packet_number_length:]
+
+	packet_payload := packet[:payload_length]
+	packet = packet[packet_payload_length:]
+
+	return Zero_RTT_Packet{
+	    version: version,
+	    dest_conn_id: dest_conn_id,
+	    source_conn_id: src_conn_id,
+	    packet_number: packet_number,
+	    packet_payload: packet_payload,
+	}, packet, nil
+}
+
+process_one_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) 
+{
+    // let's get our UUID conn id, since it's one we know we issued
+    dest_conn_id, err := uuid.read(string(dest_conn_id))
+    if err {
+	/*
+         * since we can't read the connection id, we can't tell how long
+         * the packet is supposed to be, which means we're done reading
+         * the whole datagram, because we can't tell where any additional
+         * packets are supposed to start 
+         */
+	return nil, nil, .PROTOCOL_VIOLATION
+    }
+
+    // FIXME: Remove packet protection HERE
+    // FIXME: Should we be decrypting packet protection here?
+
+    spin_bit = first_byte & (1 << 5)
+    key_phase = first_byte & (1 << 2)
+    
+    packet = packet[1:]
+    
+    // we know the dest_conn_id and src_conn_id
+    conn_idx := 1 + conn_id_len + 1 + src_conn_id_len
+    packet = packet[conn_idx:]
+    
+    payload_length, offset := get_variable_length_int(packet)
+    packet = packet[offset:] // FIXME: Maybe the function can do this part?
+    
+    packet_number: u32
+    pkt_idx := ln_idx + length
+    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
+	packet_number = (u32)b + (packet_number << 8)
+    }
+    packet = packet[packet_number_length:]
+    
+    packet_payload := packet[:payload_length]
+    packet = packet[packet_payload_length:]
+    
+    return One_RTT_Packet{
+	spin_bit: spin_bit,
+	key_phase: key_phase,
+	dest_conn_id: dest_conn_id,
+	packet_number: packet_number
+    }, packet, nil
 }
