@@ -13,6 +13,7 @@ handle_datagram :: proc(dg: []byte, ctx: Context) {
 	return
     }
 
+// by default the context has default values for its parameters which is decided in the parser
     packets := [dynamic]Packet
     defer delete(packets)
     dg := dg
@@ -45,7 +46,6 @@ process_incoming_packet :: proc(packet: []byte, ctx: Context) ->  (Packet, []byt
     packet = packet[1:]
     version : u32 // 1-RTT packets don't have this, so we don't know if this is defined
     
-
     dest_conn_id_len : u8
     src_conn_id_len: u8
     dest_conn_id : Connection_Id // maybe we --- this?
@@ -166,7 +166,27 @@ retrieve_conn :: proc(ctx: Context, packet: []byte) -> Conn {
 }
 
 process_initial :: proc(using partial: Partial_Packet, packet: []u8) -> (Packet, []u8, Transport_Error) {
-    // FIXME: Remove packet protection HERE
+
+    // REMINDER: keys are determined by the FIRST initial packet. Any subsequent ones that aren't determined
+    // by a retry use the same keys. On a retry. The keys should be marked INVALID.
+    role: Role
+    hp_key: []byte
+    if conn := findConn(dest_conn_id); conn != nil { // FIXME: REPLACE WITH ZII
+	sync.mutex_guard(conn.lock)
+	secrets := conn.secrets[.ssl_encryption_initial]
+	role = conn.role
+	if role != .Server {
+	    hp_key = secrets.client_hp  // I THINK this is right
+	} else {
+	    hp_key = secrets.server_hp // FIXME: Use examples in RFC to PROVE this is right
+	}
+    } else {
+	// FIXME: we should CONSIDER adding the conn here (BUT... it's based off the dest id, so do we NEED TO? maybe it should be handled by the frame handler, not down here)
+	secrets := determine_initial_secret(dest_conn_id)
+	hp_key = secrets.client_hp
+    }
+
+
     // FIXME: Should we be decrypting packet protection here?
     packet := packet
     token_length, offset := get_variable_length_int(packet)
@@ -177,13 +197,10 @@ process_initial :: proc(using partial: Partial_Packet, packet: []u8) -> (Packet,
     
     payload_length, offset := get_variable_length_int(packet)
     packet = packet[offset:] // FIXME: Maybe the function can do this part?
-    
-    packet_number: u32
-    pkt_idx := ln_idx + length
-    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	packet_number = (u32)b + (packet_number << 8)
-    }
-    packet = packet[packet_number_length:]
+
+
+    mask := get_header_mask(hp_key, packet[4:20], .AEAD_AES_128_GCM)
+    first_byte, packet_number, packet := remove_header_protection(first_byte, packet)
     
     packet_payload := packet[:payload_length]
     packet = packet[packet_payload_length:]
@@ -199,17 +216,22 @@ process_initial :: proc(using partial: Partial_Packet, packet: []u8) -> (Packet,
 }
 
 process_handshake :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
+    hp_key: []byte
+    if conn := findConn(dest_conn_id); conn != nil { // FIXME: REPLACE WITH ZII
+	sync.mutex_guard(conn.lock)
+	secrets := conn.secrets[.ssl_encryption_handshake]
+	hp_key := secrets.hp
+    } else {
+	return nil, nil, .Protocol_Error // We can't find the conn object for the handshake so... nah
+    }
+
     // FIXME: Remove packet protection HERE
     // FIXME: Should we be decrypting packet protection here?
     length, offset := get_variable_length_int(packet)
     packet = packet[offset:]
     
-    packet_number: u32
-    pkt_idx := ln_idx + length
-    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	packet_number = (u32)b + (packet_number << 8)
-    }
-    packet = packet[packet_number_length:]
+    mask := get_header_mask(hp_key, packet[4:20], conn.encryption.ssl)
+    first_byte, packet_number, packet := remove_header_protection(first_byte, packet)
     
     packet_payload := packet[:packet_payload_length]
     packet = packet[packet_payload_length:]
@@ -260,26 +282,31 @@ process_version_negotiation :: proc(using partial: Partial_Packet, packet: []u8,
 }
 
 process_zero_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) {
-    	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:] // FIXME: Maybe the function can do this part?
-
-	packet_number: u32
-	pkt_idx := ln_idx + length
-	for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	    packet_number = (u32)b + (packet_number << 8)
-	}
-	packet = packet[packet_number_length:]
-
-	packet_payload := packet[:payload_length]
-	packet = packet[packet_payload_length:]
-
-	return Zero_RTT_Packet{
-	    version: version,
-	    dest_conn_id: dest_conn_id,
-	    source_conn_id: src_conn_id,
-	    packet_number: packet_number,
-	    packet_payload: packet_payload,
-	}, packet, nil
+    hp_key: []byte
+    if conn := findConn(dest_conn_id); conn != nil { // FIXME: REPLACE WITH ZII
+	sync.mutex_guard(conn.lock)
+	secrets := conn.secrets[.ssl_encryption_early_data]
+	hp_key := secrets.hp
+    } else {
+	return nil, nil, .Protocol_Error // We can't find the conn object for the handshake so... nah
+    }
+    
+    payload_length, offset := get_variable_length_int(packet)
+    packet = packet[offset:] // FIXME: Maybe the function can do this part?
+    
+    mask := get_header_mask(hp_key, packet[4:20], conn.encryption.ssl)
+    first_byte, packet_number, packet := remove_header_protection(first_byte, packet)
+    
+    packet_payload := packet[:payload_length]
+    packet = packet[packet_payload_length:]
+    
+    return Zero_RTT_Packet{
+	version: version,
+	dest_conn_id: dest_conn_id,
+	source_conn_id: src_conn_id,
+	packet_number: packet_number,
+	packet_payload: packet_payload,
+    }, packet, nil
 }
 
 process_one_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Context) -> (Packet, []u8, Transport_Error) 
@@ -294,6 +321,15 @@ process_one_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Contex
          * packets are supposed to start 
          */
 	return nil, nil, .PROTOCOL_VIOLATION
+    }
+
+    hp_key: []byte
+    if conn := findConn(dest_conn_id); conn != nil { // FIXME: REPLACE WITH ZII
+	sync.mutex_guard(conn.lock)
+	secrets := conn.secrets[.ssl_encryption_application]
+	hp_key := secrets.hp
+    } else {
+	return nil, nil, .Protocol_Error // We can't find the conn object for the handshake so... nah
     }
 
     // FIXME: Remove packet protection HERE
@@ -311,12 +347,8 @@ process_one_rtt :: proc(using partial: Partial_Packet, packet: []u8, ctx: Contex
     payload_length, offset := get_variable_length_int(packet)
     packet = packet[offset:] // FIXME: Maybe the function can do this part?
     
-    packet_number: u32
-    pkt_idx := ln_idx + length
-    for b in packet[pkt_idx, pkt_idx + packet_number_length] {
-	packet_number = (u32)b + (packet_number << 8)
-    }
-    packet = packet[packet_number_length:]
+    mask := get_header_mask(hp_key, packet[4:20], conn.encryption.ssl)
+    first_byte, packet_number, packet := remove_header_protection(first_byte, packet)
     
     packet_payload := packet[:payload_length]
     packet = packet[packet_payload_length:]

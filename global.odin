@@ -11,7 +11,7 @@ import "ssl/libressl"
  */
 
 Context_Type : struct {
-    connections: [dynamic]^Conn,
+    connections: #soa[dynamic]^Conn,
     ssl_context: ssl.SSL_Context,
     lock: sync.Mutex,
 }
@@ -38,6 +38,8 @@ open_conn_server(config: Conn_Config, initial_secrets: Encryption_Level_Secrets)
 	flow_enabled = true,
 	spin_enabled = rand.uint64() % 8 != 0,
 	lock = sync.Mutex{},
+	source_conn_ids: [100]Connection_id, // just overwrite them as you go and issue valid until for that conn_id
+	dest_conn_ids: [100]Connection_id,
 	encryption = Encryption_Context{
 	    secrets = [ssl_encryption_level_t]Encryption_level_Secrets{
 		    .ssl_encryption_initial = initial_secrets
@@ -50,8 +52,25 @@ open_conn_server(config: Conn_Config, initial_secrets: Encryption_Level_Secrets)
     append(Global_Context.connections, conn)
 }
 
+// FIXME: write this function
 close_conn(conn: ^Conn) {
     // remove  it from Global_Context
 
 }
    
+// FIXME: write this function
+find_conn_by_dest_conn_id :: proc(id: Connection_Id) -> ^Conn {
+    // FIXME: Don't forget the guard
+
+}
+
+// FIXME: write this function
+find_conn_by_ssl :: proc(ssl: SSL_Connection) -> ^Conn {
+    // FIXME: Don't forget the guard
+
+}
+
+find_conn ::proc{
+    find_conn_by_dest_conn_id,
+    find_conn_by_ssl,
+}

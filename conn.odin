@@ -7,6 +7,13 @@ Connection_Id :: union {
     []u8
 }
 
+Connection_Id_St :: struct {
+    value: Connection_Id,
+    sequence_number: u64,
+    valid: bool,
+    used: bool,
+}
+
 Connection_State :: enum {
     New,
     Address_Validation,
@@ -34,8 +41,8 @@ Conn :: struct {
     streams: []Stream,     // Does conn-level limit aapply to datagram streams too? (RFC9000.4.1)
     flow_enabled: bool,
     spin_enabled: bool, // enables latency tracking in 1-rtt streams
-    source_conn_ids: []Connection_Id, 
-    destination_conn_ids: []Connection_Id,
+    source_conn_ids: #soa[]Connection_Id_St, 
+    destination_conn_ids: #soa[]Connection_Id_St,
     lock: sync.Mutex // FIXME: I think we could use a futex here? or atomics
     encryption: Encryption_Context
 }
