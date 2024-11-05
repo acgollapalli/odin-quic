@@ -1,40 +1,26 @@
 package quic
 
-// FIXME: THIS IS DEFINITELY NOT CORRECT
-make_variable_length_int :: proc(i: u64) -> []u8, err {
-    i := i
-    j := 0
-    for i > 64 {
-	i = i >> 8
-	j += 1
+make_variable_length_int :: proc(i: u64) -> ([]u8, bool){
+    out_a := make([]u8, 8)
+
+    //n : u64
+    for k : u8 = 0; k < 8; k += 1{
+	out_a[7-k] = (u8)(i >> (8 * k))
     }
 
-    i_byte := (u8)i
     switch {
-    case j == 0:
-	return []u8{ i_byte }, nil
-    case j == 1:
-	i_byte = i_byte | 1 << 6
-	return []u8{ i_byte, 64 }, nil
-    case j < 4:
-	i_byte = i_byte | 2 << 6
-	out := make([]u8, 4)
-	out[j] = i_byte
-	for k := 0; k < j; k += 1 {
-	    out[k] = 64
-	}
-	return out, nil
-	case:
-	if i_byte > 63 {
-	    return nil, i
-	} else {
-	    i_byte = i_byte | 3 << 6
-	    out := make([]u8, 8)
-	    out[j] = i_byte
-	    for k := 0; k < j; k += 1 {
-		out[k] = 64
-	    }
-	    return out, nil
-	}
+    case i < 64:
+	return out_a[7:], true
+    case i < 16384:
+	out_a[6] = out_a[6] | (1 << 6)
+	return out_a[6:], true
+    case i < 1073741824:
+	out_a[4] = out_a[4] | (2 << 6)
+	return out_a[4:], true
+    case i < 4611686018427387904:
+	out_a[0] = out_a[0] | (3 << 6)
+	return out_a[:], true
+    case:
+	return nil, false
     }
 }
