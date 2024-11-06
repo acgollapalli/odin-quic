@@ -1,9 +1,11 @@
 package quic
 
 import "core:crypto/aes"
-import "core:crypto/chacha"
+import chacha "core:crypto/chacha20"
 import "core:crypto/hkdf"
-import "ssl"
+import ssl "../odin-ssl"
+import "core:sync"
+import "core:time"
 
 // constants
 Initial_v1_Salt :: 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a
@@ -51,7 +53,7 @@ Encryption_Level_Secrets :: union {
  *  for each level
  */
 Encryption_Context :: struct {
-    secrets: [ssl_encryption_level_t]Encryption_Level_Secrets,
+    secrets: [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets,
     ssl: ssl.SSL_Connection,
     lock: sync.Mutex,
 }
@@ -79,16 +81,18 @@ get_header_mask :: proc{
 }
 
 get_header_mask_proper :: proc(hp_key, sample: []u8, algo: Packet_Protection_Algorithm) -> []byte {
+    mask : []byte
     switch algo {
     case .AEAD_AES_128_GCM:
-	return aes_ecb(hp_key, sample)
+	mask = aes_ecb_header_mask(hp_key, sample)
     case .AEAD_AES_128_CCM:
-	return aes_ecb(hp_key, sample)
+	mask = aes_ecb_header_mask(hp_key, sample)
     case .AEAD_AES_256_GCM:
-	return aes_ecb(hp_key, sample)
+	mask = aes_ecb_header_mask(hp_key, sample)
     case .AEAD_CHACHA20_POLY1305:
-	return chacha_header_mask(hp_key, sample)
+	mask = chacha_header_mask(hp_key, sample)
     }
+    return mask
 }
 
 get_header_mask_w_ssl :: proc(hp_key, sample: []u8, ssl: ssl.SSL_Connection) -> []byte {
@@ -101,19 +105,19 @@ get_header_mask_w_ssl :: proc(hp_key, sample: []u8, ssl: ssl.SSL_Connection) -> 
  */ 
 
 aes_ecb_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
-    ctx := aes.Context_ECB
-    defer(reset_ecb(ctx))
+    ctx : aes.Context_ECB
+    defer(aes.reset_ecb(&ctx))
     aes.init_ecb(&ctx, hp_key)
-    dst : make([]byte, 5) // FIXME: maybe a temp allocator here?
+    dst := make([]byte, 5) // FIXME: maybe a temp allocator here?
     aes.decrypt_ecb(&ctx, dst, sample)
     return dst
 }
 
 chacha_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
-    ctx := chacha.Context
-    defer(reset(ctx))
-    chacha.init(ctx, hp_key, sample[:4], sample[4:])
-    dst : make([]byte, 5) // FIXME: maybe a temp allocator here?
+    ctx : chacha.Context
+    defer(chacha.reset(&ctx))
+    chacha.init(&ctx, hp_key, sample[:4], sample[4:]) // FIXME: not sure what to do here
+    dst := make([]byte, 5) // FIXME: maybe a temp allocator here?
     chacha.keystream_bytes(ctx, dst)
     return dst
 }
@@ -138,12 +142,10 @@ remove_header_protection :: proc(first_byte: byte, packet: []byte, mask: []byte)
     packet = packet[packet_number_length:]
 
     // remove the protection on the packet number
-    packet_number_bytes = packet_number_bytes ~ mask[1 : packet_number_length + 1]
-
     packet_number : u32
-    
-    for b in packet_number_bytes {
-	packet_number = b + (packet_number << 8)
+    for i := 0; i < len(packet_number_bytes); i += 1 {
+	unmasked_byte := packet_number_bytes[i] ~ mask[i + 1]
+	packet_number = u32(unmasked_byte) + (packet_number << 8)
     }
 
     return first_byte, packet_number, packet
@@ -165,18 +167,21 @@ add_header_protection :: proc(first_byte: byte, packet_number_bytes: []byte, mas
 
     packet_number_length := first_byte & 0x03 // will index off this?
 
-    packet_number_bytes := packet[:packet_number_length]
-    packet = packet[packet_number_length:]
-
     // add the protection on the packet number
-    packet_number_bytes = packet_number_bytes ~ mask[1 : packet_number_length + 1]
+    for i := 0; i < len(packet_number_bytes); i += 1 {
+	packet_number_bytes[i] = packet_number_bytes[i] ~ mask[i + 1]
+    }
 
     return first_byte, packet_number_bytes
 }
 
-determine_initial_secret :: proc(salt := Initial_v1_Salt, dest_conn_id: []byte) -> Initial_Secret {
+determine_initial_secret :: proc(dest_conn_id: []byte, salt := Initial_v1_Salt) -> Initial_Secret {
     // can you allocate multiple values at once this way?
-    initial_secret, client, server, client_hp, server_hp := make([]byte) // FIXME: figure out alloc strat
+    initial_secret:= make([]byte, 256)
+    client:= make([]byte, 256)
+    server:= make([]byte, 256)
+    client_hp:= make([]byte, 256)
+    server_hp := make([]byte, 256)
 
     hkdf.extract(salt, dest_conn_id, initial_secret)
 

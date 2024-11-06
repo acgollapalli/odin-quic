@@ -22,7 +22,7 @@ Transport_Error :: enum {
     CRYPTO_ERROR,
 }
 
-Transport_Error_Codes :: [Transport_Error][]? {
+Transport_Error_Codes :: [Transport_Error][]i32 {
 	.NO_ERROR                       = { 0x00 },
 	.INTERNAL_ERROR                 = { 0x01 },
 	.CONNECTION_REFUSED             = { 0x02 },

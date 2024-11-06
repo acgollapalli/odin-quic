@@ -1,7 +1,7 @@
 package quic
 
 // listen for incoming connections
-listen :: proc()
+server_listen :: proc()
 
 // embed early data
 embed_in_tls_resumption_ticket :: proc()

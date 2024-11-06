@@ -1,7 +1,7 @@
 package quic
 
 // Open a connection
-open :: proc(conn: struct {}, early-data: bool)
+open :: proc(conn: struct {}, early_data: bool)
 
 // listen to a connection
 listen :: proc(conn: struct {})

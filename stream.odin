@@ -30,7 +30,7 @@ Flow : union {
     Datagram_flow
 }
 
-Datagram_flow {
+Datagram_flow :: struct {
     id: u64,
 }
 
@@ -66,15 +66,11 @@ Receiving_Stream_State :: enum {
 
 
 stream_id_bits:: proc(stream_type: Stream_Type, stream_initiator: Stream_Initiator) -> int {
-    return (stream_type << 1) | stream_initiator
+    return (int(stream_type) << 1) | int(stream_initiator)
 }
 
-create_stream :: proc(id: int, stream_type: Stream_Type, stream_initiator: Stream_Initiator) -> Stream {
-    last_bits := stream_id_bits(stream_type, stream_initiator)
-    return Stream{
-	id: (id << 2) | last_bits
-    }
-}
+create_stream :: proc(id: int, stream_type: Stream_Type, stream_initiator: Stream_Initiator) -> Stream 
+
 accept_stream :: proc() -> Stream
 close_stream :: proc()
 read_stream :: proc()

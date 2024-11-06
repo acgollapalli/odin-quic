@@ -23,7 +23,7 @@ Transport_Param :: enum {
     grease_quic_bit,
 }
 
-Transport_Param_Codes :: [Transport_Param]? {
+Transport_Param_Codes :: [Transport_Param]i32 {
 	.original_destination_connection_id     = 0x00,
 	.max_idle_timeout                       = 0x01,
 	.stateless_reset_token                  = 0x02,

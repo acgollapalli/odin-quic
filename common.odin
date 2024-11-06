@@ -2,7 +2,7 @@ package quic
 
 import "core:net"
 import "core:fmt"
-import "core:uuid"
+import "core:encoding/uuid"
 import "core:time"
 
 Role :: enum {
