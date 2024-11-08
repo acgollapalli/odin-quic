@@ -88,3 +88,21 @@ Long_Header_Packet :: union {
     Handshake_Packet,
     Retry_Packet,
 }
+
+get_dest_conn_id :: proc(packet: Packet) -> Connection_Id{
+    switch p in packet {
+    case Version_Negotiation_Packet:
+	return p.dest_conn_id
+    case Initial_Packet:
+	return p.dest_conn_id
+    case Zero_RTT_Packet:
+	return p.dest_conn_id
+    case Handshake_Packet:
+	return p.dest_conn_id
+    case Retry_Packet:
+	return p.dest_conn_id
+    case One_RTT_Packet:
+	return p.dest_conn_id
+    }
+    return nil
+}

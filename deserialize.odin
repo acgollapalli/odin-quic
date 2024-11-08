@@ -1,7 +1,6 @@
 package quic
 
 import "core:sync"
-import "core:encoding/uuid"
 import ssl "../odin-ssl"
 
 Partial_Packet :: struct {
@@ -30,10 +29,10 @@ handle_datagram :: proc(dg: []byte) {
 	if dest_conn_id == nil {
 	    switch p in packet {
 	    case Version_Negotiation_Packet, Initial_Packet, Zero_RTT_Packet, Handshake_Packet, Retry_Packet, One_RTT_Packet:
-		dest_conn_id = packet.dest_conn_id // FIXME: Don't know what to do here
+		dest_conn_id = get_dest_conn_id(packet) // FIXME: Don't know what to do here
 	    }
 	    append(&packets, packet)
-	} else if dest_conn_id == packet.dest_conn_id  {
+	} else if string(dest_conn_id) == string(get_dest_conn_id(packet))  {
 	    append(&packets, packet) // FIXME: instead of appending to a dynamic array, we should just handle the packet
 	}
     }
@@ -327,21 +326,9 @@ process_zero_rtt :: proc(using partial: Partial_Packet, packet: []u8) -> (Packet
 process_one_rtt :: proc(partial: Partial_Packet, packet: []u8) -> (Packet, []u8, Transport_Error) 
 {
     packet := packet
-    dest_conn_id_bytes: []byte = partial.dest_conn_id // can't shadow variables with using
+    dest_conn_id := partial.dest_conn_id // can't shadow variables with using
     first_byte := partial.first_byte
     
-    // let's get our UUID conn id, since it's one we know we issued
-    dest_conn_id, err := uuid.read(string(dest_conn_id_bytes))
-    if err != nil {
-	/*
-         * since we can't read the connection id, we can't tell how long
-         * the packet is supposed to be, which means we're done reading
-         * the whole datagram, because we can't tell where any additional
-         * packets are supposed to start 
-         */
-	return nil, nil, .PROTOCOL_VIOLATION
-    }
-
     hp_key: []byte
     conn := find_conn(dest_conn_id)
     if conn != nil { // FIXME: REPLACE WITH ZII

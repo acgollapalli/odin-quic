@@ -3,12 +3,20 @@ package quic
 import "core:crypto/aes"
 import chacha "core:crypto/chacha20"
 import "core:crypto/hkdf"
+import "core:crypto/hash"
 import ssl "../odin-ssl"
 import "core:sync"
 import "core:time"
+import "core:encoding/hex"
+
+hex_decode_const :: proc(str: string) -> []u8{
+    out, err := hex.decode(raw_data(str)[:len(str)])
+    return out
+}
+    
 
 // constants
-Initial_v1_Salt :: 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a
+Initial_v1_Salt := hex_decode_const("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
 
 // Encryption Algorithms
 Packet_Protection_Algorithm :: enum {
@@ -116,9 +124,12 @@ aes_ecb_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
 chacha_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
     ctx : chacha.Context
     defer(chacha.reset(&ctx))
-    chacha.init(&ctx, hp_key, sample[:4], sample[4:]) // FIXME: not sure what to do here
+    chacha.init(&ctx, hp_key, sample[4:]) // FIXME: not sure what to do here
+    counter : u64
+    for b, i in sample[0:4] do counter += u64(b) << 8*u64(i)
+    chacha.seek(&ctx, counter)
     dst := make([]byte, 5) // FIXME: maybe a temp allocator here?
-    chacha.keystream_bytes(ctx, dst)
+    chacha.keystream_bytes(&ctx, dst)
     return dst
 }
 
@@ -175,25 +186,40 @@ add_header_protection :: proc(first_byte: byte, packet_number_bytes: []byte, mas
     return first_byte, packet_number_bytes
 }
 
+// FIXME: Make SURE that we're using an allocator that isn't trying to grab
+// each of these individually! BUT we only ever do it on key changes, so it's
+// probably not a huge deal
+tlsv13_expand_label :: proc(key: []u8, $label: string, algo: hash.Algorithm = hash.Algorithm.SHA256) -> []byte {
+    out := make([]byte, 256)
+    hkdf_label: [len(label) + 9]u8
+    prefix : string = "tlsv13 "
+
+    hkdf_label[1] = u8(len(label))
+    for b, i in prefix {
+	hkdf_label[i+2] = u8(b)
+    }
+    for b, i in label {
+	hkdf_label[i+9] = u8(b)
+    }
+
+    hkdf.expand(algo, key, hkdf_label[:], out)
+    return out
+}
+
+// FIXME: we may want to just have an Encyrption Secrets object passsed in so
+// we can reuse the key buffers.
 determine_initial_secret :: proc(dest_conn_id: []byte, salt := Initial_v1_Salt) -> Initial_Secret {
     // can you allocate multiple values at once this way?
-    initial_secret:= make([]byte, 256)
-    client:= make([]byte, 256)
-    server:= make([]byte, 256)
-    client_hp:= make([]byte, 256)
-    server_hp := make([]byte, 256)
+    initial_secret := make([]u8, 256)
+    hkdf.extract(hash.Algorithm.SHA256, salt, dest_conn_id, initial_secret)
 
-    hkdf.extract(salt, dest_conn_id, initial_secret)
-
-    hkdf.expand(initial_secret, "client in", client)
-    hkdf.expand(initial_secret, "server in", server)
-    hkdf.expand(client, "quic hp", client_hp)
-    hkdf.expand(server, "quic hp", server_hp)
-
-    #assert(initial_secret^ != client_hp^)
+    client:= tlsv13_expand_label(initial_secret, "client in")
+    server:= tlsv13_expand_label(initial_secret, "server in")
+    client_hp:= tlsv13_expand_label(client, "quic hp")
+    server_hp := tlsv13_expand_label(server, "quic hp")
 
     return Initial_Secret{
-	initial_Secret,
+	initial_secret,
 	client,
 	server,
 	client_hp,

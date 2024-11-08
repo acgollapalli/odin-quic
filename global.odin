@@ -18,16 +18,20 @@ Context_Type :: struct {
 }
 
 Global_Context : Context_Type
+Cert_Path :: #config(Cert_Path, ".")
+Pkey_Path :: #config(Pkey_Path, ".")
+Cert_Type :: #config(Cert_Type, 2)
+Pkey_Type :: #config(Pkey_Type, 1)
 
 init_quic_context :: proc() {
     Global_Context = Context_Type{ // do we even need this? it should init most of it to empty by default, right?
 	make(#soa[dynamic]Conn),
-	ssl.create_ctx(), // FIXME: We need to be able to get certs out of some kind of config
+	ssl.create_ctx(Cert_Path, Pkey_Path, ssl.Certificate(Cert_Type), ssl.Certificate(Pkey_Type)), // FIXME: We need to be able to get certs out of some kind of config
 	sync.Mutex{},
     }
 }
 
-open_conn_server :: proc(config: Conn_Config, initial_secrets: Encryption_Level_Secrets) {
+open_conn_server :: proc(config: Conn_Config, initial_secrets: Encryption_Level_Secrets, early_data_secrets: Encryption_Level_Secrets = nil) {
     sync.mutex_guard(&Global_Context.lock) // acquire lock and release it when done
     
     
@@ -43,7 +47,12 @@ open_conn_server :: proc(config: Conn_Config, initial_secrets: Encryption_Level_
 	source_conn_ids = make(Connection_Ids, 100), // just overwrite them as you go and issue valid until for that conn_id
 	dest_conn_ids = make(Connection_Ids, 100),
 	encryption = Encryption_Context{
-	    secrets = [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets{initial_secrets},
+	    secrets = [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets{
+		.ssl_encryption_initial = initial_secrets,
+		.ssl_encryption_early_data = early_data_secrets,
+		.ssl_encryption_handshake = nil,
+		.ssl_encryption_application = nil,
+	    },
 	    ssl = libressl.SSL_new(Global_Context.ssl_context),
 	    lock = sync.Mutex{}
 	}
