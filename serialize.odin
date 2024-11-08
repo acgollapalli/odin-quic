@@ -6,86 +6,88 @@ serialize_packet :: proc(conn: ^Conn, packet: Packet) -> []u8 {
     out: [dynamic]u8
     append(&out, 0) // placeholder first byte
     append(&out, ..serialize_header(packet))
-    payload, pkt_number_index, pkt_number_length := serialize_payload
+    payload, pkt_number_index, pkt_number_length := serialize_payload(conn, packet)
     append(&out, ..payload)
 
     out[0] = make_first_byte(packet, u8(pkt_number_length))
 
-    apply_header_protection(&conn, &out, pkt_number_index, pkt_number_length)
+    apply_header_protection(conn, &out, packet, pkt_number_index, pkt_number_length)
     
     
     // FIXME: at the end, we need to add the retry integrity tag!
+   
 
+    return out[:]
 }
 
 // header
 // includes version, destination connection id + length source id + length
 serialize_header :: proc(packet: Packet) -> []u8 {
-    header := make([]u8, 46)
+    header : [dynamic]u8
 
     switch p in packet { // FIXME: Holy code duplication batman!
     case One_RTT_Packet:
-	for b in p.dest_conn_id do append(&out, b)
-	header = header[0:len(dest_conn_id) + 1]
+	for b in p.dest_conn_id do append(&header, b)
+	return header[0:len(p.dest_conn_id) + 1]
     case Version_Negotiation_Packet:
-	append(&out, ..[]u8{0,0,0,0})
-	append(&out, len(p.dest_conn_id))
-	for b in p.dest_conn_id do append(&out, b)
-	append(&out, len(p.source_conn_id))
-	for b in p.source_conn_id do append(&out, b)
+	append(&header, ..[]u8{0,0,0,0})
+	append(&header, u8(len(p.dest_conn_id)))
+	for b in p.dest_conn_id do append(&header, b)
+	append(&header, u8(len(p.source_conn_id)))
+	for b in p.source_conn_id do append(&header, b)
 	len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-	header = header[0:len]
+	return header[0:len]
     case Initial_Packet:
-	for b in make_version(p.version) do append(&out, b)
-	append(&out, len(p.dest_conn_id))
-	for b in p.dest_conn_id do append(&out, b)
-	append(&out, len(p.source_conn_id))
-	for b in p.source_conn_id do append(&out, b)
+	for b in make_version(p.version) do append(&header, b)
+	append(&header, u8(len(p.dest_conn_id)))
+	for b in p.dest_conn_id do append(&header, b)
+	append(&header, u8(len(p.source_conn_id)))
+	for b in p.source_conn_id do append(&header, b)
 	len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-	header = header[0:len]
-    case Zero_RTT_Packet:
-	for b in make_version(p.version) do append(&out, b)
-	append(&out, len(p.dest_conn_id))
-	for b in p.dest_conn_id do append(&out, b)
-	append(&out, len(p.source_conn_id))
-	for b in p.source_conn_id do append(&out, b)
+	return header[0:len]
+    case Zero_RTT_Packet: for b in make_version(p.version) do append(&header, b)
+	append(&header, u8(len(p.dest_conn_id)))
+	for b in p.dest_conn_id do append(&header, b)
+	append(&header, u8(len(p.source_conn_id)))
+	for b in p.source_conn_id do append(&header, b)
 	len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-	header = header[0:len]
+	return header[0:len]
     case Handshake_Packet:
-	for b in make_version(p.version) do append(&out, b)
-	append(&out, len(p.dest_conn_id))
-	for b in p.dest_conn_id do append(&out, b)
-	append(&out, len(p.source_conn_id))
-	for b in p.source_conn_id do append(&out, b)
+	for b in make_version(p.version) do append(&header, b)
+	append(&header, u8(len(p.dest_conn_id)))
+	for b in p.dest_conn_id do append(&header, b)
+	append(&header, u8(len(p.source_conn_id)))
+	for b in p.source_conn_id do append(&header, b)
 	len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-	header = header[0:len]
+	return header[0:len]
     case Retry_Packet:
-	for b in make_version(p.version) do append(&out, b)
-	append(&out, len(p.dest_conn_id))
-	for b in p.dest_conn_id do append(&out, b)
-	append(&out, len(p.source_conn_id))
-	for b in p.source_conn_id do append(&out, b)
+	for b in make_version(p.version) do append(&header, b)
+	append(&header, u8(len(p.dest_conn_id)))
+	for b in p.dest_conn_id do append(&header, b)
+	append(&header, u8(len(p.source_conn_id)))
+	for b in p.source_conn_id do append(&header, b)
 	len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-	header = header[0:len]
+	return header[0:len]
     }
-    return header
+    return header[:]
 }
 
-serialize_payload :: proc(packet: Packet) -> ([]u8, int, int) {
+serialize_payload :: proc(conn: ^Conn, packet: Packet) -> ([]u8, int, int) {
     switch p in packet {
     case One_RTT_Packet:
-	return protect_payload(p.payload), nil
+	return protect_payload(conn, p), 0, 0
     case Version_Negotiation_Packet:
 	outLen := len(p.supported_versions) * 4
-	out = make([]u8, outLen)
+	out := make([]u8, outLen)
 	for v, i in p.supported_versions {
 	    idx := i*4
-	    make_version(v, out[idx:idx+4])
+	    version := out[idx:idx+4]
+	    make_version_bytes(v, &version)
 	}
-	return out, nil, nil
+	return out, 0, 0 
     case Initial_Packet:
 	token_len := make_variable_length_int(len(p.token))
-	payload_len := make_variable_length_int(len(payload))
+	payload_len := make_variable_length_int(len(p.packet_payload))
 	packet_number := make_packet_number(p.packet_number)
 
 	out : [dynamic]u8
@@ -95,13 +97,13 @@ serialize_payload :: proc(packet: Packet) -> ([]u8, int, int) {
 	append(&out, ..p.token)
 	append(&out, ..payload_len)
 	append(&out, ..packet_number)
-	append(&out, ..protect_payload(p.payload))
+	append(&out, ..protect_payload(conn, p))
 
 	return out[:], pkt_number_idx, len(packet_number)
     case Zero_RTT_Packet:
 	packet_number := make_packet_number(p.packet_number)
-	payload_len := make_variable_length_int(p.payload_length)
-	payload := protect_payload(p.payload)
+	payload_len := make_variable_length_int(len(p.packet_payload))
+	payload := protect_payload(conn, p)
 
 	out : [dynamic]u8
 
@@ -111,8 +113,8 @@ serialize_payload :: proc(packet: Packet) -> ([]u8, int, int) {
 	return out[:], len(payload_len), len(packet_number)
     case Handshake_Packet:
 	packet_number := make_packet_number(p.packet_number)
-	payload_len := make_variable_length_int(p.payload_length)
-	payload := protect_payload(p.payload)
+	payload_len := make_variable_length_int(len(p.packet_payload))
+	payload := protect_payload(conn, p)
 
 	out : [dynamic]u8
 
@@ -121,24 +123,35 @@ serialize_payload :: proc(packet: Packet) -> ([]u8, int, int) {
 	append(&out, ..payload)
 	return out[:], len(payload_len), len(packet_number)
     case Retry_Packet:
-	return p.retry_token
+	return p.retry_token, 0, 0
 	// retry integrity tag needs to be appended after everything else
     }
-    return nil // will nver hit this, but the compiler complains
+    return nil, 0, 0// will nver hit this, but the compiler complains
 }
 
 
 
 protect_payload :: proc(conn: ^Conn, packet: Packet) -> []u8 {
-    return packet.payload // FIXME: implement properly
+    //return packet.payload // FIXME: implement properly
 
 }
 
-make_version :: proc(version: u32, out: ^[]u8) {
-    for i:uint = 0; i < 4; i += 1 {
+make_version_bytes :: proc(version: u32, out: ^[]u8) {
+    for i:u32 = 0; i < 4; i += 1 {
 	out[3-i] = u8(version >> 8*i)
     }
-}   
+}
+
+
+// FIXME: when we write the zero-copy version, this should go away
+make_version :: proc(version: u32) -> []u8 {
+    out := make([]u8, 4)
+    make_version_bytes(version, &out)
+    return out
+}
+
+make_packet_number :: make_version
+
 
 // FIXME: This function is used to CONSTRUCT the packet
 // structs. Unless we want to remove the first byte arg
@@ -167,16 +180,41 @@ make_first_byte :: proc(packet_untyped: Packet, packet_number_length: u8) -> u8 
     case Retry_Packet:
 	return header_form | fixed_bit | 0x03 << 4
     case One_RTT_Packet:
-	spin_bit := packet.spin_bit ? 1 << 5 : 0
-	key_phase := packet.key_phase ? 1 << 2 : 0 // 0x04
+	spin_bit : u8 = packet.spin_bit ? 1 << 5 : 0
+	key_phase : u8 = packet.key_phase ? 1 << 2 : 0 // 0x04
 	return fixed_bit | spin_bit | key_phase | (packet_number_length - 1)
+    }
+    return 0 // unreachable (but compiler)
+}
+
+make_variable_length_int :: proc(#any_int i: u64) -> ([]u8, bool) #optional_ok {
+    out_a := make([]u8, 8)
+
+    //n : u64
+    for k : u8 = 0; k < 8; k += 1{
+	out_a[7-k] = (u8)(i >> (8 * k))
+    }
+
+    switch {
+    case i < 64:
+	return out_a[7:], true
+    case i < 16384:
+	out_a[6] = out_a[6] | (1 << 6)
+	return out_a[6:], true
+    case i < 1073741824:
+	out_a[4] = out_a[4] | (2 << 6)
+	return out_a[4:], true
+    case i < 4611686018427387904:
+	out_a[0] = out_a[0] | (3 << 6)
+	return out_a[:], true
+    case:
+	return nil, false
     }
 }
 
-
-apply_header_protection :: proc(conn: ^Conn, packet: ^[dynamic]u8, pkt_number_index: int, pkt_number_length: int) {
+apply_header_protection :: proc(conn: ^Conn, packet: ^[dynamic]u8, pkt_obj: Packet, pkt_number_index: int, pkt_number_length: int) {
     encryption_level : ssl.QUIC_Encryption_Level
-    #partial switch p in packet {
+    #partial switch p in pkt_obj {
 	case Initial_Packet:
 	encryption_level = .ssl_encryption_initial
 	case Zero_RTT_Packet:
@@ -192,8 +230,8 @@ apply_header_protection :: proc(conn: ^Conn, packet: ^[dynamic]u8, pkt_number_in
     hp_key := get_hp_key(conn, encryption_level)
     mask: = get_header_mask(hp_key, packet[pkt_number_index + 4 : pkt_number_index + 20], conn.encryption.ssl)
 
-    packet_number_bytes := &packet[pkt_number_index : pkt_number_index + pkt_number_length]
+    packet_number_bytes := packet[pkt_number_index : pkt_number_index + pkt_number_length]
 
-	&packet[0], packet_number_bytes = add_header_protection(packet[0], packet_number_bytes, mask)
+	packet[0], packet_number_bytes = add_header_protection(packet[0], packet_number_bytes, mask)
 
 }

@@ -43,15 +43,13 @@ open_conn_server :: proc(config: Conn_Config, initial_secrets: Encryption_Level_
 	source_conn_ids = make(Connection_Ids, 100), // just overwrite them as you go and issue valid until for that conn_id
 	dest_conn_ids = make(Connection_Ids, 100),
 	encryption = Encryption_Context{
-	    secrets = [SSL.QUIC_Encryption_Level]Encryption_Level_Secrets{
-		    initial_secrets
-	    },
+	    secrets = [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets{initial_secrets},
 	    ssl = libressl.SSL_new(Global_Context.ssl_context),
 	    lock = sync.Mutex{}
 	}
     }
 
-    append(Global_Context.connections, conn)
+    append(&Global_Context.connections, conn)
 }
 
 // FIXME: write this function
