@@ -11,3 +11,14 @@ Because I can, or at least I think I can.
 
 ** Can I help?
 Sure, if you want. 
+
+* Goals
+Right now this is in the early phase of implementation. I am just trying to get it to work.
+
+The ulimate goal is to have a fast, lock-free, zero-copy implementation, in which data is read from the
+socket and decrypted in place, and passed on to whatever associated process requires it (or otherwise
+dropped).
+
+I intend to use a single arena per datagram as my memory allocation strategy, but that
+is very much in flux. I think there may be more thought needed to put that in, but being
+able to free all memory used in the process of decryption is my intent for right now.
