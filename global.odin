@@ -12,9 +12,10 @@ import "core:sync"
  */
 
 Context_Type :: struct {
-	connections: #soa[dynamic]Conn,
-	ssl_context: ssl.SSL_Context,
-	lock:        sync.Mutex,
+	connections:            #soa[dynamic]Conn,
+	ssl_context:            ssl.SSL_Context,
+	stateless_reset_tokens: map[[16]byte]Connection_Id,
+	lock:                   sync.Mutex,
 }
 
 Global_Context: Context_Type
@@ -32,6 +33,7 @@ init_quic_context :: proc() {
 			ssl.Certificate(Cert_Type),
 			ssl.Certificate(Pkey_Type),
 		), // FIXME: We need to be able to get certs out of some kind of config
+		map[[16]byte]Connection_Id{},
 		sync.Mutex{},
 	}
 }
