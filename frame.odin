@@ -5,7 +5,6 @@ Frame :: struct {
 		^Padding_Frame,
 		^Ping_Frame,
 		^Ack_Frame,
-		^Ack_Frame_With_Counts,
 		^Reset_Stream_Frame,
 		^Stop_Sending_Frame,
 		^Crypto_Frame,
@@ -24,7 +23,7 @@ Frame :: struct {
 		^Connection_Close_Frame,
 		^Handshake_Done_Frame,
 		^Datagram_Frame,
-	}
+	},
 }
 
 new_frame :: proc($T: typeid) -> ^T {
@@ -32,8 +31,6 @@ new_frame :: proc($T: typeid) -> ^T {
 	f.variant = f
 	return f
 }
-	
-
 
 
 // FIXME: This is probably unnecessary and overcomplicated
@@ -63,47 +60,29 @@ new_frame :: proc($T: typeid) -> ^T {
 //}
 
 
-	Padding_Frame :: struct {
-		using frame: Frame,
-	} //type: int = 0 `serialize:"variable_length_int"`,
+Padding_Frame :: struct {
+	using frame: Frame,
+} //type: int = 0 `serialize:"variable_length_int"`,
 
 
 add_padding_frame :: proc(payload: ^[]u8, _: Padding_Frame) {
 	add_variable_length_int(payload, 0x00)
 }
 
-	Ping_Frame :: struct {
-		using frame: Frame,
-	} //type: int = 1 `serialize:"variable_length_int"`,
+Ping_Frame :: struct {
+	using frame: Frame,
+} //type: int = 1 `serialize:"variable_length_int"`,
 
 
 add_ping_frame :: proc(payload: ^[]u8, _: Ping_Frame) {
 	add_variable_length_int(payload, 0x01)
 }
 
-Ack_Frame :: struct {
-	//type: u64 = 2 `serialize:"variable_length_int"`, // OPTIMIZE: really this is u8
-	largest_ack:     u64 `serialize:"variable_length_int"`,
-	ack_delay:       u64 `serialize:"variable_length_int"`,
-	//ack_range_count: u64 `serialize:"variable_length_int"`,
-	first_ack_range: u64 `serialize:"variable_length_int"`,
-	ack_ranges:      []u64 `serialize:"variable_length_int"`, // see RFC9000.19.3.1
-	using frame: Frame,
-}
-
-add_ack_frame :: proc(payload: ^[]u8, frame: Ack_Frame) {
-	add_variable_length_int(payload, 0x02) // frame type
-	add_variable_length_int(payload, frame.largest_ack)
-	add_variable_length_int(payload, frame.ack_delay)
-	add_variable_length_int(payload, len(frame.ack_ranges) / 2) // ack_range_count
-	add_variable_length_int(payload, frame.first_ack_range)
-	for i in frame.ack_ranges do add_variable_length_int(payload, i)
-}
-
 // MAYBE: we MIGHT want to do some polymorphism here...
 // but we also might not
-Ack_Frame_With_Counts :: struct {
+Ack_Frame :: struct {
 	//type: u64 = 3 `serialize:"variable_length_int"`, // really this is u8
+	has_ecn_counts:  bool,
 	largest_ack:     u64 `serialize:"variable_length_int"`,
 	ack_delay:       u64 `serialize:"variable_length_int"`,
 	//ack_range_count: u64 `serialize:"variable_length_int"`,
@@ -114,13 +93,10 @@ Ack_Frame_With_Counts :: struct {
 		ect1_count:   u64 `serialize:"[]variable_length_int"`,
 		ecn_ce_count: u64 `serialize:"[]variable_length_int"`,
 	},
-	using frame: Frame,
+	using frame:     Frame,
 }
 
-add_ack_frame_with_counts :: proc(
-	payload: ^[]u8,
-	frame: Ack_Frame_With_Counts,
-) {
+add_ack_frame_with_counts :: proc(payload: ^[]u8, frame: Ack_Frame) {
 	add_variable_length_int(payload, 0x03) // frame type
 	add_variable_length_int(payload, frame.largest_ack)
 	add_variable_length_int(payload, frame.ack_delay)
@@ -128,17 +104,19 @@ add_ack_frame_with_counts :: proc(
 	add_variable_length_int(payload, frame.first_ack_range)
 	for i in frame.ack_ranges do add_variable_length_int(payload, i)
 
-	add_variable_length_int(payload, frame.ecn_counts.ect0_count)
-	add_variable_length_int(payload, frame.ecn_counts.ect1_count)
-	add_variable_length_int(payload, frame.ecn_counts.ecn_ce_count)
+	if frame.has_ecn_counts {
+		add_variable_length_int(payload, frame.ecn_counts.ect0_count)
+		add_variable_length_int(payload, frame.ecn_counts.ect1_count)
+		add_variable_length_int(payload, frame.ecn_counts.ecn_ce_count)
+	}
 }
 
 Reset_Stream_Frame :: struct {
 	//type: int = 4 `serialize:"variable_length_int"`, // really this is u8
-	stream_id:      int `serialize:"variable_length_int"`,
-	app_error_code: int `serialize:"variable_length_int"`,
-	final_size:     int `serialize:"variable_length_int"`,
-	using frame: Frame,
+	stream_id:      u64 `serialize:"variable_length_int"`,
+	app_error_code: u64 `serialize:"variable_length_int"`,
+	final_size:     u64 `serialize:"variable_length_int"`,
+	using frame:    Frame,
 }
 
 add_reset_stream_frame :: proc(payload: ^[]u8, frame: Reset_Stream_Frame) {
@@ -150,8 +128,9 @@ add_reset_stream_frame :: proc(payload: ^[]u8, frame: Reset_Stream_Frame) {
 
 Stop_Sending_Frame :: struct {
 	//type: int = 5 `serialize:"variable_length_int"`, // really this is u8
-	stream_id:      int `serialize:"variable_length_int"`,
-	app_error_code: int `serialize:"variable_length_int"`,
+	stream_id:      u64 `serialize:"variable_length_int"`,
+	app_error_code: u64 `serialize:"variable_length_int"`,
+	using frame:    Frame,
 }
 
 add_stop_sending_frame :: proc(payload: ^[]u8, frame: Stop_Sending_Frame) {
@@ -162,7 +141,7 @@ add_stop_sending_frame :: proc(payload: ^[]u8, frame: Stop_Sending_Frame) {
 
 Crypto_Frame :: struct {
 	//type: int = 6 `serialize:"variable_length_int"`, // really this is u8
-	offset:      int `serialize:"variable_length_int"`,
+	offset:      u64 `serialize:"variable_length_int"`,
 	//length:      int `serialize:"variable_length_int"`,
 	crypto_data: []byte,
 	using frame: Frame,
@@ -179,7 +158,7 @@ add_crypto_frame :: proc(payload: ^[]u8, frame: Crypto_Frame) {
 New_Token_Frame :: struct {
 	//type: int = 7 `serialize:"variable_length_int"`, // really this is u8
 	//token_length: int `serialize:"variable_length_int"`,
-	token: []byte, // REMINDER: must be of len > 0
+	token:       []byte, // REMINDER: must be of len > 0
 	using frame: Frame,
 }
 
@@ -195,8 +174,8 @@ Stream_Frame :: struct {
 	has_len:     bool `serialize:"bit_flip(type, 0x02), include_field(length)"`,
 	fin_bit:     bool `serialize:"bit_flip(type, 0x01)"`,
 	//type: int = 8 `serialize:"variable_length_int"`,
-	stream_id:   int `serialize:"variable_length_int"`,
-	offset:      int `serialize:"variable_length_int"`,
+	stream_id:   u64 `serialize:"variable_length_int"`,
+	offset:      u64 `serialize:"variable_length_int"`,
 	//length:      int `serialize:"variable_length_int"`,
 	stream_data: []byte,
 	using frame: Frame,
@@ -218,7 +197,7 @@ add_stream_frame :: proc(payload: ^[]u8, frame: Stream_Frame) {
 
 Max_Data_Frame :: struct {
 	//type: int = 0x10 `serialize:"variable_length_int"`,
-	max_data: int `serialize:"variable_length_int"`,
+	max_data:    u64 `serialize:"variable_length_int"`,
 	using frame: Frame,
 }
 
@@ -229,9 +208,9 @@ add_max_data_frame :: proc(payload: ^[]u8, frame: Max_Data_Frame) {
 
 Max_Stream_Data_Frame :: struct {
 	//type: int = 0x11 `serialize:"variable_length_int"`,
-	stream_id:       int `serialize:"variable_length_int"`,
-	max_stream_data: int `serialize:"variable_length_int"`,
-	using frame: Frame,
+	stream_id:       u64 `serialize:"variable_length_int"`,
+	max_stream_data: u64 `serialize:"variable_length_int"`,
+	using frame:     Frame,
 }
 
 add_max_stream_data_frame :: proc(
@@ -247,7 +226,7 @@ add_max_stream_data_frame :: proc(
 Max_Streams_Frame :: struct {
 	//type: int = 0x12 `serialize:"variable_length_int"`,
 	one_way:     bool, // set type to 0x13
-	max_streams: int `serialize:"variable_length_int"`,
+	max_streams: u64 `serialize:"variable_length_int"`,
 	using frame: Frame,
 }
 
@@ -260,7 +239,7 @@ add_max_streams_frame :: proc(payload: ^[]u8, frame: Max_Streams_Frame) {
 
 Data_Blocked_Frame :: struct {
 	//type: int = 0x14 `serialize:"variable_length_int"`,
-	max_data: int `serialize:"variable_length_int"`,
+	max_data:    u64 `serialize:"variable_length_int"`,
 	using frame: Frame,
 }
 
@@ -271,8 +250,8 @@ add_data_blocked_frame :: proc(payload: ^[]u8, frame: Data_Blocked_Frame) {
 
 Stream_Data_Blocked_Frame :: struct {
 	//type: int = 0x15 `serialize:"variable_length_int"`,
-	stream_id: int `serialize:"variable_length_int"`,
-	max_data:  int `serialize:"variable_length_int"`,
+	stream_id:   u64 `serialize:"variable_length_int"`,
+	max_data:    u64 `serialize:"variable_length_int"`,
 	using frame: Frame,
 }
 
@@ -288,7 +267,8 @@ add_stream_data_blocked_frame :: proc(
 Streams_Blocked_Frame :: struct {
 	//type: int = 0x16 `serialize:"variable_length_int"`,
 	one_way:     bool, // set type to 0x16
-	max_streams: int `serialize:"variable_length_int"`,
+	max_streams: u64 `serialize:"variable_length_int"`,
+	using frame: Frame,
 }
 
 add_streams_blocked_frame :: proc(
@@ -303,12 +283,12 @@ add_streams_blocked_frame :: proc(
 
 New_Connection_Id_Frame :: struct {
 	//type: int = 0x18 `serialize:"variable_length_int"`,
-	sequence_num:          int `serialize:"variable_length_int"`, // see RFC9000.5.1.1
-	retire_prior_to:       int `serialize:"variable_length_int"`, // see RFC9000.5.1.2
+	sequence_num:          u64 `serialize:"variable_length_int"`, // see RFC9000.5.1.1
+	retire_prior_to:       u64 `serialize:"variable_length_int"`, // see RFC9000.5.1.2
 	//length:                u8, // FIXME: must be 0 < length =< 20
 	connection_id:         []byte,
 	stateless_reset_token: ^[16]byte, // see RFC9000.10.3
-	using frame: Frame,
+	using frame:           Frame,
 }
 
 add_new_connection_id_frame :: proc(
@@ -326,8 +306,8 @@ add_new_connection_id_frame :: proc(
 
 Retire_Connection_Id_Frame :: struct {
 	//type: int = 0x19 `serialize:"variable_length_int"`,
-	sequence_num: int `serialize:"variable_length_int"`, // see RFC9000.5.1.2
-	using frame: Frame,
+	sequence_num: u64 `serialize:"variable_length_int"`, // see RFC9000.5.1.2
+	using frame:  Frame,
 }
 
 add_retire_connection_id_frame :: proc(
@@ -340,7 +320,7 @@ add_retire_connection_id_frame :: proc(
 
 Path_Challenge_Frame :: struct {
 	//type: int = 0x1a `serialize:"variable_length_int"`,
-	data: u64, // FIXME: Should these just be byte arrays?
+	data:        u64, // FIXME: Should these just be byte arrays?
 	using frame: Frame,
 }
 
@@ -357,7 +337,7 @@ add_path_challenge_frame :: proc(payload: ^[]u8, frame: Path_Challenge_Frame) {
 
 Path_Response_Frame :: struct {
 	//type: int = 0x1b `serialize:"variable_length_int"`,
-	data: u64, // don't FIXME: no, we just have to check match
+	data:        u64, // don't FIXME: no, we just have to check match
 	using frame: Frame,
 }
 
@@ -372,60 +352,40 @@ add_path_response_frame :: proc(payload: ^[]u8, frame: Path_Response_Frame) {
 	}
 }
 
-Connection_Close_Quic_Error_Frame :: struct {
+Connection_Close_Frame :: struct {
 	//type: int = 0x1c `serialize:"variable_length_int"`,
-	error_code:        int `serialize:"variable_length_int"`,
-	frame_type:        int `serialize:"variable_length_int"`,
-	reason_phrase_len: int `serialize:"variable_length_int"`,
-	reason_phrase:     string, // RFC9000.19.19 requires utf8 (odin default)
-	using frame: Frame,
+	is_app_error:  bool,
+	error_code:    u64 `serialize:"variable_length_int"`,
+	frame_type:    u64 `serialize:"variable_length_int"`,
+	//reason_phrase_len: u64 `serialize:"variable_length_int"`,
+	reason_phrase: string, // RFC9000.19.19 requires utf8 (odin default)
+	using frame:   Frame,
 }
 
-add_connection_close_quic_error_frame :: proc(
+add_connection_close_frame :: proc(
 	payload: ^[]u8,
-	frame: Connection_Close_Quic_Error_Frame,
+	frame: Connection_Close_Frame,
 ) {
-	add_variable_length_int(payload, 0x1c)
-	add_variable_length_int(payload, frame.error_code)
+	type := 0x1c
+	if frame.is_app_error do type += 1
+	add_variable_length_int(payload, type)
+	if frame.is_app_error do add_variable_length_int(payload, frame.error_code)
 	add_variable_length_int(payload, frame.frame_type)
-	add_variable_length_int(payload, frame.reason_phrase_len)
+	add_variable_length_int(payload, len(frame.reason_phrase))
 	add_bytes(payload, transmute([]u8)frame.reason_phrase)
 }
 
-Connection_Close_App_Error_Frame :: struct {
-	//type: int = 0x1d `serialize:"variable_length_int"`,
-	error_code:        int `serialize:"variable_length_int"`,
-	reason_phrase_len: int `serialize:"variable_length_int"`,
-	reason_phrase:     string, // FIXME: but allocations? utf8 lib? string -> runes
+Handshake_Done_Frame :: struct {
 	using frame: Frame,
-}
-
-add_connection_close_app_error_frame :: proc(
-	payload: ^[]u8,
-	frame: Connection_Close_App_Error_Frame,
-) {
-	add_variable_length_int(payload, 0x1d)
-	add_variable_length_int(payload, frame.error_code)
-	add_variable_length_int(payload, frame.reason_phrase_len)
-	add_bytes(payload, transmute([]u8)frame.reason_phrase)
-}
-
-Connection_Close_Frame :: union {
-	Connection_Close_Quic_Error_Frame,
-	Connection_Close_App_Error_Frame,
-}
-
-	Handshake_Done_Frame :: struct {
-		using frame: Frame,
-	} //type: int = 0x1e `serialize:"variable_length_int"`,
+} //type: int = 0x1e `serialize:"variable_length_int"`,
 
 add_handshake_done_frame :: proc(payload: ^[]u8, frame: Handshake_Done_Frame) {
 	add_variable_length_int(payload, 0x1e)
 }
 Datagram_Frame :: struct {
 	//type: int = 0x30 `serialize:"variable_length_int"`,
-	has_len: bool, // make type 0x31
-	data:    []byte,
+	has_len:     bool, // make type 0x31
+	data:        []byte,
 	using frame: Frame,
 }
 
