@@ -1,3 +1,7 @@
+/*
+ * SDG                                                                         JJ
+ */
+
 package quic
 
 // Open a connection
@@ -8,4 +12,3 @@ listen :: proc(conn: struct {})
 
 // handle early data reject or accept
 handle_early_data :: proc()
-

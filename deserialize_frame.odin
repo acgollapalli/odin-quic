@@ -1,3 +1,7 @@
+/*
+ * SDG                                                                         JJ
+ */
+
 package quic
 
 import "base:runtime"
@@ -43,19 +47,19 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 		frame = new(Crypto_Frame)
 	case 0x07:
 		frame = new(New_Token_Frame)
-	case 0x08..=0x0f:
+	case 0x08 ..= 0x0f:
 		frame = new(Stream_Frame)
 	case 0x10:
 		frame = new(Max_Data_Frame)
 	case 0x11:
 		frame = new(Max_Stream_Data_Frame)
-	case 0x12..=0x13:
+	case 0x12 ..= 0x13:
 		frame = new(Max_Streams_Frame)
 	case 0x14:
 		frame = new(Data_Blocked_Frame)
 	case 0x15:
 		frame = new(Stream_Data_Blocked_Frame)
-	case 0x16..=0x17:
+	case 0x16 ..= 0x17:
 		frame = new(Streams_Blocked_Frame)
 	case 0x18:
 		frame = new(New_Connection_Id_Frame)
@@ -65,11 +69,11 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 		frame = new(Path_Challenge_Frame)
 	case 0x1b:
 		frame = new(Path_Response_Frame)
-	case 0x1c..=0x1d:
+	case 0x1c ..= 0x1d:
 		frame = new(Connection_Close_Frame)
 	case 0x1e:
 		frame = new(Handshake_Done_Frame)
-	case 0x30..=0x31:
+	case 0x30 ..= 0x31:
 		frame = new(Datagram_Frame)
 	}
 
@@ -78,7 +82,7 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 	return frame, err
 }
 
-_read_frame :: proc(frame: ^Frame, payload: ^[]u8 ) -> Transport_Error {
+_read_frame :: proc(frame: ^Frame, payload: ^[]u8) -> Transport_Error {
 	switch f in frame.variant {
 	case ^Padding_Frame:
 		return read_padding(f, payload)
@@ -126,12 +130,22 @@ _read_frame :: proc(frame: ^Frame, payload: ^[]u8 ) -> Transport_Error {
 	return nil
 }
 
-read_padding :: proc(frame: ^Padding_Frame, payload: ^[]u8) -> (err: Transport_Error) {
+read_padding :: proc(
+	frame: ^Padding_Frame,
+	payload: ^[]u8,
+) -> (
+	err: Transport_Error,
+) {
 	payload^ = payload[1:]
 	return nil
 }
 
-read_ping :: proc(frame: ^Ping_Frame, payload: ^[]u8) -> (err: Transport_Error) {
+read_ping :: proc(
+	frame: ^Ping_Frame,
+	payload: ^[]u8,
+) -> (
+	err: Transport_Error,
+) {
 	payload^ = payload[1:]
 	return nil
 }
@@ -149,7 +163,7 @@ read_ack :: proc(frame: ^Ack_Frame, payload: ^[]u8) -> (err: Transport_Error) {
 
 	// FIXME: Is this how we should handle messed up packets?
 	if len(payload) < int(ack_range_count * 2) {
-		return  .PROTOCOL_VIOLATION
+		return .PROTOCOL_VIOLATION
 	}
 
 	// the QUIC protocol expects us to ensure that the ack ranges are all above
@@ -448,7 +462,7 @@ read_datagram :: proc(
 	frame.has_len = payload[0] == 0x31
 	payload^ = payload[1:]
 
-	length : u64
+	length: u64
 	if frame.has_len {
 		length = read_variable_length_int(payload) or_return
 	}
@@ -499,7 +513,7 @@ read_bytes :: proc(
 	if length > len(payload) do return nil, .PROTOCOL_VIOLATION
 	out := make([]u8, length) // out[:length] 
 
-	for b,i in payload[:length] {
+	for b, i in payload[:length] {
 		out[i] = b
 	}
 
