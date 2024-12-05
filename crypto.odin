@@ -4,7 +4,7 @@
 
 package quic
 
-import ssl "../odin-ssl"
+import ssl "../ssl"
 import "core:crypto/aes"
 import chacha "core:crypto/chacha20"
 import chacha_poly1305 "core:crypto/chacha20poly1305"
@@ -287,7 +287,7 @@ tlsv13_expand_label :: proc(
 	algo: hash.Algorithm = hash.Algorithm.SHA256,
 ) -> []byte {
 	out := make([]byte, 256)
-	hkdf_label: [len(label) + 9]u8
+	hkdf_label: [len(label) + 9]u8 // these DO NOT have the null terminating byte
 	prefix: string = "tlsv13 "
 
 	hkdf_label[1] = u8(len(label))
@@ -304,6 +304,8 @@ tlsv13_expand_label :: proc(
 
 // FIXME: we may want to just have an Encyrption Secrets object passsed in so
 // we can reuse the key buffers.
+// NOTE: Only call this if you are NOT sending a Retry, or AFTER path-validation
+// is completed via the Retry packet
 determine_initial_secret :: proc(
 	dest_conn_id: []byte,
 	salt := Initial_v1_Salt,
@@ -337,6 +339,7 @@ protect_payload :: proc(
 	conn: ^Conn,
 	packet: Packet,
 	header: []u8,
+	payload: []u8,
 ) -> (
 	[]u8,
 	[]u8,
@@ -346,7 +349,7 @@ protect_payload :: proc(
 	get_nonce :: proc(iv: []u8, packet_number: u32) -> []u8 {
 		nonce := make([]u8, len(iv))
 		for i: u8 = 0; i < 4; i += 1 {
-			nonce[i] = u8(packet_number >> i * 8)
+			nonce[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) // nonce is padded w/ zeroes 
 		}
 		for &b, i in nonce {
 			b ~= iv[i] // bitwise xor with iv
@@ -364,19 +367,15 @@ protect_payload :: proc(
 	case Initial_Packet:
 		key, iv, algo := get_secret_iv_and_algo(conn, .Initial_Encryption)
 		nonce = get_nonce(iv, p.packet_number)
-		payload = p.packet_payload
 	case Zero_RTT_Packet:
 		key, iv, algo := get_secret_iv_and_algo(conn, .Early_Data_Encryption)
 		nonce = get_nonce(iv, p.packet_number)
-		payload = p.packet_payload
 	case Handshake_Packet:
 		key, iv, algo := get_secret_iv_and_algo(conn, .Handshake_Encryption)
 		nonce = get_nonce(iv, p.packet_number)
-		payload = p.packet_payload
 	case One_RTT_Packet:
 		key, iv, algo := get_secret_iv_and_algo(conn, .Application_Encryption)
 		nonce = get_nonce(iv, p.packet_number)
-		payload = p.packet_payload
 	case Retry_Packet:
 		key = Retry_v1_Key
 		nonce = Retry_v1_Nonce
@@ -409,4 +408,21 @@ encrypt_payload :: proc(
 		chacha_poly1305.init(&ctx, key)
 		chacha_poly1305.seal(&ctx, cipher_text, tag, iv, associated_data, payload)
 	}
+}
+
+// TODO 
+generate_retry_token :: proc(dest_conn_id: []byte) {}
+
+// TODO
+validate_rety_token :: proc(
+	dest_conn_id: []byte,
+	token: []byte,
+) -> bool {return false}
+
+read_crypto_frame_data :: proc(
+	conn: ^Conn,
+	level: ssl.QUIC_Encryption_Level,
+	frame: ^Crypto_Frame, // FIXME: Should we be passing a ptr if we're not modifying
+) {
+	ssl.provide_quic_data(conn.encryption.ssl, level, frame.crypto_data)
 }

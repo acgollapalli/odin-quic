@@ -44,7 +44,7 @@ Initial_Packet :: struct {
 	source_conn_id: Connection_Id,
 	token:          []u8,
 	packet_number:  u32,
-	packet_payload: []u8,
+	packet_payload: []^Frame,
 }
 
 Zero_RTT_Packet :: struct {
@@ -52,7 +52,7 @@ Zero_RTT_Packet :: struct {
 	dest_conn_id:   Connection_Id,
 	source_conn_id: Connection_Id,
 	packet_number:  u32,
-	packet_payload: []u8,
+	packet_payload: []^Frame,
 }
 
 Handshake_Packet :: struct {
@@ -60,7 +60,7 @@ Handshake_Packet :: struct {
 	dest_conn_id:   Connection_Id,
 	source_conn_id: Connection_Id,
 	packet_number:  u32,
-	packet_payload: []u8,
+	packet_payload: []^Frame,
 }
 
 
@@ -82,7 +82,7 @@ One_RTT_Packet :: struct {
 	key_phase:      bool,
 	dest_conn_id:   Connection_Id,
 	packet_number:  u32,
-	packet_payload: []u8,
+	packet_payload: []^Frame,
 }
 
 

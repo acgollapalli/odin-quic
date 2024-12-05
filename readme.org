@@ -22,3 +22,38 @@ dropped).
 I intend to use a single arena per datagram as my memory allocation strategy, but that
 is very much in flux. I think there may be more thought needed to put that in, but being
 able to free all memory used in the process of decryption is my intent for right now.
+
+* Some Implementation Notes
+** Threading on the Transport Layer
+Since this is not Go, we cannot simply create a green thread for each connection.
+
+However, each connection has a connection id, and we can assert that each connection id has a hash (like a UUID or even just an integer).
+
+If we assert that:
++ We always have a prime number of threads
++ Each connection id can be hashed to something modulus the number of threads.
++ Each dest-connection-id contained in the header of every packet is placed into a global hash-map as a key, the value of which is the hash of the connection_id.
++ Thus, each packet can be partitioned to a specific thread, without any lookups
+
+Some synchronization is required upon increasing the thread count.
++ When the thread count changes, a flag is changed by a coordination thread, with the new and old thread count.
++ The writing thread pool that reads the sockets may read into the new threads buffers immediately, however, the deserialization threads may not start work until partition is complete.
++ Each thread reads this flag every time, but never writes it.
++ Each thread has it's own control variable, a bit in an aray of bigints.
++ Each thread `n` < `prev_thread_count` must signal that it is ready for a repartition, by handling all packets written to it at time it read the partition flag. This offset into its buffer is stored in a thread-local variable.
++ Once all threads with `n` < `prev_thread_count` are ready for repartition, the new threads, which up til this point have been checking the array of partition signal flags, may now begin work.
++ When it is time to increase thread count again, then the signal bits in the signal array are reset to 0.
+
+Synchronizing decreases in thread count.
++ Threads of `new_thread_count` < `n` < prev_thread_count` must finish their workloads entirely and flip their signal bits
++ Once their signal bits have been flipped they may be ended by the coordinator thread.
+
+Handling issues in scaling.
++ Each thread has an assigned counter for its live connections, as well as a counter for the current length of its input buffers, and a running avarage of the time from a packet being read into its buffer, to being handled.
++ If any of these numbers get too high, then the thread may request a re-partition of connections and increase in thread.
++ Any thread may request an increase in thread count, however, only the coordinator thread, iterating across the metrics of all threads may decrease the thread count via repartition.
+
+Some important notes.
+All connection state is stored globally. We can store it in a hash map, in an array, or whatever is fastest to update. Hashmap is probably best to start with, but we may get fancy with it later. The important thing is that the threads are only given packets that are associated with the connections that they should be modifying.
+All connection state and synchronization state is global. There are no locks, no mutexes, no futexes, no async-await, nothing. The only time when one thread may block another is when that thread is newly created.
+destination_onnection_id and source_connection_id creation, storage, and invalidation, are handled solely by the thread designated to it by the overall partitioning scheme. So we can have a global hash_map of dest_connection_ids and still have it be thread_safe.

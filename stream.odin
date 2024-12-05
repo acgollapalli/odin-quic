@@ -4,30 +4,45 @@
 
 package quic
 
+
 Stream :: union {
 	Sending_Stream,
 	Receiving_Stream,
 	Bidirectional_Stream,
 }
 
-
 Sending_Stream :: struct {
 	id:            u64,
-	limit:         u64,
+	max_data:      u64,
 	sending_state: Sending_Stream_State,
+	bytes_sent:    u64,
+	buffer:        []u8,
+	err:           u64,
 }
 
 Receiving_Stream :: struct {
 	id:              u64,
-	limit:           u64, // FIXME: Version 1 only allows limits in a 62 bit uint
+	max_data:        u64, // FIXME: Version 1 only allows limits in a 62 bit uu64
 	receiving_state: Receiving_Stream_State,
+	bytes_received:  u64,
+	bytes_read:      u64,
+	buffer:          []u8,
+	err:             u64,
 }
 
+Unidirectional_Stream :: struct {}
+
 Bidirectional_Stream :: struct {
-	id:              u64,
-	limit:           int,
-	sending_state:   Sending_Stream_State,
-	receiving_State: Receiving_Stream_State,
+	id:               u64,
+	send_max_data:    u64,
+	receive_max_data: u64,
+	sending_state:    Sending_Stream_State,
+	receiving_state:  Receiving_Stream_State,
+	bytes_read:       u64,
+	bytes_written:    u64,
+	receive_buffer:   []u8,
+	send_buffer:      []u8,
+	err:              u64,
 }
 
 Flow: union {
@@ -41,11 +56,6 @@ Datagram_flow :: struct {
 Stream_Type :: enum {
 	Bidirectional,
 	Unidirectional,
-}
-
-Stream_Initiator :: enum {
-	Client,
-	Server,
 }
 
 // from suggestion in RFC 9000.3.1
@@ -71,7 +81,7 @@ Receiving_Stream_State :: enum {
 
 stream_id_bits :: proc(
 	stream_type: Stream_Type,
-	stream_initiator: Stream_Initiator,
+	stream_initiator: Role,
 ) -> int {
 	return (int(stream_type) << 1) | int(stream_initiator)
 }
@@ -111,3 +121,58 @@ stream_id_bits :: proc(
 // * frame when it has no ack-eliciting packets in flight
 //*/
 //handle_blocked :: proc(stream: Stream)
+
+// will initialize streams as requested by remote, provided that they are within configured limits
+// will NOT initialize streams for locally initiated streams, but will instead return nil and a
+// Transport Error.
+get_stream :: proc(conn: ^Conn, stream_id: u64) -> (Stream, Transport_Error) {
+	if stream_id > (u64(2) << 62 - 1) do return nil, .STREAM_STATE_ERROR
+
+	last_bit := stream_id & 0x01
+	initiator: Role
+	if last_bit == 0 do initiator = .Client
+	else do initiator = .Server
+
+	dir_bit := stream_id & 0x02
+	stream_type: Stream_Type
+	if dir_bit == 0 do stream_type = .Bidirectional
+	else do stream_type = .Unidirectional
+
+	stream_index := stream_id >> 2
+
+	if initiator == conn.role {
+		s: [dynamic]Stream
+
+		switch stream_type {
+		case .Bidirectional:
+			s = conn.locally_initiated_streams_bi
+		case .Unidirectional:
+			s = conn.locally_initiated_streams_uni
+		}
+
+		if u64(len(s)) <= stream_index do return nil, .STREAM_STATE_ERROR
+		else do return s[stream_index], nil
+	} else {
+		s: [dynamic]Stream
+		max: u64
+		switch stream_type {
+		case .Bidirectional:
+			s = conn.remote_initiated_streams_bi
+			max = conn.max_remote_streams_limit_bi
+		case .Unidirectional:
+			s = conn.remote_initiated_streams_uni
+			max = conn.max_remote_streams_limit_uni
+		}
+
+		if stream_index > max do return nil, .STREAM_STATE_ERROR
+
+		if u64(len(s)) <= stream_index {
+			if err := reserve(&s, int(stream_id >> 2 - 1)); err == nil {
+				return s[stream_id >> 2], nil
+			} else {
+				return nil, .STREAM_LIMIT_ERROR
+			}
+		} else do return s[stream_id], nil
+	}
+
+}

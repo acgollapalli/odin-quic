@@ -1,10 +1,12 @@
 /*
- * SDG                                                                         JJ
+
+SDG                                                                            JJ
+
  */
 
 package quic
 
-import ssl "../odin-ssl"
+import ssl "../ssl"
 import "core:sync"
 
 Partial_Packet :: struct {
@@ -16,41 +18,37 @@ Partial_Packet :: struct {
 
 
 handle_datagram :: proc(dg: []byte) {
-	if len(dg) < 1280 {
-		return
-	}
-
-	// by default the context has default values for its parameters which is decided in the parser
-	packets: [dynamic]Packet // FIXME: we don't really want to use dynamic here
-	defer delete(packets)
-	dg := dg
-
 	dest_conn_id: Connection_Id
+	conn: Maybe(^Conn) // we don't know the connn til we have the dest_conn_id
 
-	for len(dg) > 0 { 	// FIXME: how do we handle cases where we don't have enough for a full packet?
-		packet, dg := process_incoming_packet(dg) or_break // FIXME: we're just passing the error up
+	len_dg := len(dg)
 
-		if dest_conn_id == nil {
-			switch p in packet {
-			case Version_Negotiation_Packet,
-			     Initial_Packet,
-			     Zero_RTT_Packet,
-			     Handshake_Packet,
-			     Retry_Packet,
-			     One_RTT_Packet:
-				dest_conn_id = get_dest_conn_id(packet) // FIXME: Don't know what to do here
-			}
-			append(&packets, packet)
+	for len(dg) > 0 {
+		packet, dg, err := process_incoming_packet(dg) // FIXME: pass conn here
+
+		// establish our baselines
+		if dest_conn_id == nil do dest_conn_id = get_dest_conn_id(packet)
+		if conn == nil do conn = find_conn(dest_conn_id)
+
+		if err != nil {
+			handle_transport_error(conn, err)
+			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) {
-			append(&packets, packet) // FIXME: instead of appending to a dynamic array, we should just handle the packet
+			handle_incoming_packet(conn, packet, len_dg) // TODO: This should MAYBE put the packet on thread specific queue
 		}
 	}
 }
 
 
+// FIXME: pass in conn here
 // handle incoming packet
-// FIXME: we should be using core:bytes reader here
-process_incoming_packet :: proc(packet: []byte) -> (Packet, []byte, Transport_Error) {
+process_incoming_packet :: proc(
+	packet: []byte,
+) -> (
+	Packet,
+	[]byte,
+	Transport_Error,
+) {
 	packet := packet // let's mutate the slice as we iterate
 
 	/* This is under header protection
@@ -179,9 +177,9 @@ process_initial :: proc(
 	using partial: Partial_Packet,
 	packet: []u8,
 ) -> (
-	Packet,
-	[]u8,
-	Transport_Error,
+	pkt: Packet,
+	remaining: []u8,
+	err: Transport_Error,
 ) {
 	packet := packet
 
@@ -221,12 +219,18 @@ process_initial :: proc(
 	packet = packet[pl_offset:] // FIXME: Maybe the function can do this part?
 
 
-	mask := get_header_mask(hp_key, packet[4:20], Packet_Protection_Algorithm.AEAD_AES_128_GCM)
+	mask := get_header_mask(
+		hp_key,
+		packet[4:20],
+		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
+	)
 	packet_number: u32
 	_, packet_number, packet = remove_header_protection(first_byte, packet, mask)
 
 	packet_payload := packet[:payload_length]
 	packet = packet[payload_length:]
+
+	frames := read_frames(packet_payload) or_return
 
 	return Initial_Packet {
 			version = version,
@@ -234,7 +238,7 @@ process_initial :: proc(
 			source_conn_id = src_conn_id,
 			packet_number = packet_number,
 			token = token,
-			packet_payload = packet_payload,
+			packet_payload = frames,
 		},
 		packet,
 		nil
@@ -244,9 +248,9 @@ process_handshake :: proc(
 	using partial: Partial_Packet,
 	packet: []u8,
 ) -> (
-	Packet,
-	[]u8,
-	Transport_Error,
+	pktObj: Packet,
+	remaining: []u8,
+	err: Transport_Error,
 ) {
 	packet := packet
 
@@ -254,7 +258,11 @@ process_handshake :: proc(
 	mask: []byte
 	conn := find_conn(dest_conn_id)
 	if conn != nil { 	// FIXME: REPLACE WITH ZII
-		mask = get_header_mask(packet[4:20], conn, ssl.QUIC_Encryption_Level.Handshake_Encryption)
+		mask = get_header_mask(
+			packet[4:20],
+			conn,
+			ssl.QUIC_Encryption_Level.Handshake_Encryption,
+		)
 	} else {
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
 	}
@@ -271,12 +279,13 @@ process_handshake :: proc(
 	packet_payload := packet[:payload_length]
 	packet = packet[payload_length:]
 
+	frames := read_frames(packet_payload) or_return
 	return Handshake_Packet {
 			version = version,
 			dest_conn_id = dest_conn_id,
 			source_conn_id = src_conn_id,
 			packet_number = packet_number,
-			packet_payload = packet_payload,
+			packet_payload = frames,
 		},
 		packet,
 		nil
@@ -342,9 +351,9 @@ process_zero_rtt :: proc(
 	using partial: Partial_Packet,
 	packet: []u8,
 ) -> (
-	Packet,
-	[]u8,
-	Transport_Error,
+	pkt: Packet,
+	remaining: []u8,
+	err: Transport_Error,
 ) {
 	packet := packet
 
@@ -352,7 +361,11 @@ process_zero_rtt :: proc(
 	mask: []byte
 	conn := find_conn(dest_conn_id)
 	if conn != nil { 	// FIXME: REPLACE WITH ZII
-		mask = get_header_mask(packet[4:20], conn, ssl.QUIC_Encryption_Level.Early_Data_Encryption)
+		mask = get_header_mask(
+			packet[4:20],
+			conn,
+			ssl.QUIC_Encryption_Level.Early_Data_Encryption,
+		)
 	} else {
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
 	}
@@ -366,18 +379,27 @@ process_zero_rtt :: proc(
 	packet_payload := packet[:payload_length]
 	packet = packet[payload_length:]
 
+	frames := read_frames(packet_payload) or_return
+
 	return Zero_RTT_Packet {
 			version = version,
 			dest_conn_id = dest_conn_id,
 			source_conn_id = src_conn_id,
 			packet_number = packet_number,
-			packet_payload = packet_payload,
+			packet_payload = frames,
 		},
 		packet,
 		nil
 }
 
-process_one_rtt :: proc(partial: Partial_Packet, packet: []u8) -> (Packet, []u8, Transport_Error) {
+process_one_rtt :: proc(
+	partial: Partial_Packet,
+	packet: []u8,
+) -> (
+	pkt: Packet,
+	remaining: []u8,
+	err: Transport_Error,
+) {
 	packet := packet
 	dest_conn_id := partial.dest_conn_id // can't shadow variables with using
 	first_byte := partial.first_byte
@@ -407,12 +429,14 @@ process_one_rtt :: proc(partial: Partial_Packet, packet: []u8) -> (Packet, []u8,
 	spin_bit := (decrypted_first_byte & (1 << 5)) != 0
 	key_phase := (decrypted_first_byte & (1 << 2)) != 0
 
+	frames := read_frames(packet) or_return
+
 	return One_RTT_Packet {
 			spin_bit = spin_bit,
 			key_phase = key_phase,
 			dest_conn_id = dest_conn_id,
 			packet_number = packet_number,
-			packet_payload = packet,
+			packet_payload = frames,
 		},
 		nil,
 		nil

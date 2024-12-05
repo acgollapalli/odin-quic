@@ -4,7 +4,7 @@
 
 package quic
 
-import ssl "../odin-ssl"
+import ssl "../ssl"
 
 serialize_packet :: proc(conn: ^Conn, packet: Packet) -> []u8 {
 	out: [dynamic]u8
@@ -78,9 +78,17 @@ serialize_payload :: proc(
 	packet: Packet,
 	out: ^[dynamic]u8,
 ) -> int {
+	payload_buf := make([]u8, 600) // FIXME: we shouldn't be using dynamics or doing this
+	payload_buf = payload_buf[:0]
+	defer delete(payload_buf)
 	switch p in packet {
 	case One_RTT_Packet:
-		payload, tag := protect_payload(conn, p, out[:])
+		payload, tag := protect_payload(
+			conn,
+			p,
+			out[:],
+			serialize_frames(&payload_buf, p.packet_payload),
+		)
 		append(out, ..payload)
 		append(out, ..tag)
 		return 0
@@ -104,7 +112,12 @@ serialize_payload :: proc(
 		pkt_number_idx := len(out)
 		append(out, ..packet_number)
 
-		payload, tag := protect_payload(conn, p, out[:])
+		payload, tag := protect_payload(
+			conn,
+			p,
+			out[:],
+			serialize_frames(&payload_buf, p.packet_payload),
+		)
 		append(out, ..payload)
 		append(out, ..tag)
 
@@ -118,7 +131,12 @@ serialize_payload :: proc(
 		pkt_number_idx := len(out)
 		append(out, ..packet_number)
 
-		payload, tag := protect_payload(conn, p, out[:])
+		payload, tag := protect_payload(
+			conn,
+			p,
+			out[:],
+			serialize_frames(&payload_buf, p.packet_payload),
+		)
 		append(out, ..payload)
 		append(out, ..tag)
 
@@ -131,7 +149,12 @@ serialize_payload :: proc(
 		pkt_number_idx := len(out)
 
 		append(out, ..packet_number)
-		payload, tag := protect_payload(conn, p, out[:])
+		payload, tag := protect_payload(
+			conn,
+			p,
+			out[:],
+			serialize_frames(&payload_buf, p.packet_payload),
+		)
 
 		append(out, ..payload)
 		append(out, ..tag)
@@ -145,7 +168,7 @@ serialize_payload :: proc(
 		append(&pseudo_packet, ..p.original_dest_conn_id)
 
 		// getting the retry integrity tag
-		_, tag := protect_payload(conn, p, pseudo_packet[:])
+		_, tag := protect_payload(conn, p, pseudo_packet[:], payload_buf)
 
 		delete(pseudo_packet) // cleanup
 

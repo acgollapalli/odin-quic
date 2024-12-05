@@ -9,7 +9,7 @@ import "base:runtime"
 import "core:fmt"
 
 
-read_packets :: proc(payload: []u8) -> (out: []^Frame, err: Transport_Error) {
+read_frames :: proc(payload: []u8) -> (out: []^Frame, err: Transport_Error) {
 	payload := payload
 
 	frames := make([dynamic]^Frame)

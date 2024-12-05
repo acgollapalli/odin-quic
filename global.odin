@@ -4,8 +4,8 @@
 
 package quic
 
-import ssl "../odin-ssl"
-import libressl "../odin-ssl/bindings"
+import ssl "../ssl"
+import libressl "../ssl/bindings"
 import "core:math/rand"
 import "core:sync"
 
@@ -52,8 +52,8 @@ open_conn_server :: proc(
 
 	// add it to Global_Context
 	conn := Conn {
-		send_limit = config.send_limit,
-		receive_limit = config.receive_limit,
+		send_max_data = config.send_limit,
+		receive_max_data = config.receive_limit,
 		version = .QUICv1,
 		role = config.role,
 		flow_enabled = true,
@@ -76,9 +76,15 @@ open_conn_server :: proc(
 	append(&Global_Context.connections, conn)
 }
 
-// FIXME: write this function
-close_conn :: proc(conn: ^Conn) {
-	// remove  it from Global_Context
+// FIXME: IMPLEMENT
+// Here we set the connection to closing
+// Any subsequent packets are dropped.
+// nothing else is added to the queue
+close_conn :: proc(conn: ^Conn, error: Transport_Error) {
+
+}
+
+queue_close_conn :: proc(conn: ^Conn, error: Transport_Error) {
 
 }
 

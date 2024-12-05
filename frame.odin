@@ -36,6 +36,36 @@ new_frame :: proc($T: typeid) -> ^T {
 	return f
 }
 
+Frame_Tag :: enum {
+	.Padding,
+	.Ping,
+	.Ack,
+	.Reset_Stream,
+	.Stop_Sending,
+	.Crypto,
+	.New_Token,
+	.Stream,
+	.Max_Data,
+	.Max_Stream_Data,
+	.Max_Streams,
+	.Data_Blocked,
+	.Stream_Data_Blocked,
+	.Streams_Blocked,
+	.New_Connection_Id,
+	.Retire_Connection_Id,
+	.Path_Challenge,
+	.Path_Response,
+	.Connection_Close,
+	.Handshake_Done,
+	.Datagram,
+}
+
+Non_Ack_Eliciting_Frames: bitset[Frame_Tag] = {
+	.Ack,
+	.Padding,
+	.Connection_Close,
+}
+
 
 // FIXME: This is probably unnecessary and overcomplicated
 // but it helps me to see it here. 
@@ -100,7 +130,7 @@ Ack_Frame :: struct {
 	using frame:     Frame,
 }
 
-add_ack_frame_with_counts :: proc(payload: ^[]u8, frame: Ack_Frame) {
+add_ack_frame :: proc(payload: ^[]u8, frame: Ack_Frame) {
 	add_variable_length_int(payload, 0x03) // frame type
 	add_variable_length_int(payload, frame.largest_ack)
 	add_variable_length_int(payload, frame.ack_delay)
