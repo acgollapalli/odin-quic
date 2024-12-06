@@ -27,9 +27,15 @@ import "core:sync"
 import "core:time"
 
 /*
-    kPacketThreshold:  Maximum reordering in packets before packet
-      threshold loss detection considers a packet lost.  The value
-      recommended in RFC9002 Section 6.1.1 is 3.
+  kPacketThreshold:  Maximum reordering in packets before packet
+    threshold loss detection considers a packet lost.  The value
+    recommended in RFC 9002 Section 6.1.1 is 3.
+
+  Per RFC 9002 Section 6.1.1, implementations SHOULD NOT use a 
+  kPacketThreshold less than 3. 
+
+  In the future, we MAY implement adaptive increases to this threshold
+  on a per-connection basis.
 */
 K_PACKET_THRESHOLD :: #config(K_PACKET_THRESHOLD, 3)
 
@@ -38,13 +44,13 @@ K_PACKET_THRESHOLD :: #config(K_PACKET_THRESHOLD, 3)
       loss detection considers a packet lost.  Specified as an RTT
       multiplier.  The value recommended in RFC9002 Section 6.1.2 is 9/8.
 */
-K_TIME_THRESHOLD :: 9.0 / 8.0
+K_TIME_THRESHOLD_NUMERATOR, K_TIME_THRESHOLD_DENOMINATOR :: 9, 8
 
 /*
    kGranularity:  Timer granularity.  This is a system-dependent value,
       and RFC9002 Section 6.1.2 recommends a value of 1 ms.
 */
-K_GRANULARITY :: #config(K_GRANULARITY, 1_000_000)
+K_GRANULARITY :: time.Duration(#config(K_GRANULARITY, 1_000_000))
 
 // NOTE: We are NOT ACTUALLY expecting THREE HUNDRED AND THIRTY THREE
 // *MILLISECONDS*. Anything above 15 is bad, and above 30 utterly
@@ -53,7 +59,7 @@ K_GRANULARITY :: #config(K_GRANULARITY, 1_000_000)
    kGranularity:  Timer granularity.  This is a system-dependent value,
       and RFC9000 Section 6.1.2 recommends a value of 1 ms.
 */
-K_INITIAL_RTT :: #config(K_INITIAL_RTT, 333) * K_GRANULARITY
+K_INITIAL_RTT :: time.Duration(#config(K_INITIAL_RTT, 333) * K_GRANULARITY)
 
 /*
    Round Trip Time State Tracking
@@ -119,7 +125,7 @@ RTT_State :: struct {
 */
 Pending_Ack :: struct {
 	packet_number: u64,
-	frames:        []Frame,
+	frames:        []^Frame,
 	ack_eliciting: bool,
 	in_flight:     bool,
 	sent_bytes:    int,
@@ -132,17 +138,30 @@ Pending_Ack :: struct {
 // Even assuming peer consolidates acks, the lock is stil acquired
 // more than once for datagram sent. This is one of those structs
 // that would really benefit from being lock-free.
+// If you have 100,000 players updating 144 times/second,
+// this gets called 14.4 million times per second.
+// TODO: figure out a lock-free version of this.
 /*
-  Pending_Acks
+  Ack_State
 
-  Map of packet_numbers to Pending_Acks.
+  Tracks the largest acknowledged packet and the packets awaiting
+  acknowledgement.
+  
+  This uses a mutex, not a shared_lock. This is because it is 
+  written to every time a packet is sent and every time an 
+  Ack_Frame is received. 
 
-  Has a lock so that multiple threads don't try to delete or
-  write to it at the same time.
+  It is almost always updated when it is read.
 */
-Pending_Acks :: struct {
-	acks: map[u64]^Pending_Ack,
-	lock: sync.Mutex,
+Ack_State :: [Packet_Number_Space]struct {
+	pending:       map[u64]^Pending_Ack,
+	lock:          sync.Mutex,
+	largest_acked: u64,
+
+	/*
+      placeholder for detecting spurious retransmission
+	lost:          map[u64]^Pending_Ack,
+    */
 }
 
 /*
@@ -173,6 +192,7 @@ init_rtt :: proc(allocator := context.allocator) -> ^RTT_State {
   It updates the min RTT to the minimum of the latest RTT and the stored min RTT
   It also updates the smoothed RTT and the RTT variance 
 */
+@(private = "file")
 update_rtt :: proc(
 	conn: ^Conn,
 	path: net.Endpoint,
@@ -206,12 +226,10 @@ update_rtt :: proc(
 			if (latest_rtt >= rtt.min + ack_delay) {
 				adjusted_rtt -= ack_delay
 			}
-			rtt.smoothed = time.Duration(
-				0.875 * f64(rtt.smoothed) + 0.125 * f64(adjusted_rtt),
-			)
+			rtt.smoothed = (7 * rtt.smoothed + adjusted_rtt) / 8
 
 			rtt_var_sample := abs(rtt.smoothed - adjusted_rtt)
-			rtt.var = time.Duration(0.75 * f64(rtt.var) + 0.25 * f64(rtt_var_sample))
+			rtt.var = (3 * rtt.var + rtt_var_sample) / 4
 
 			return true
 		}
@@ -256,4 +274,167 @@ encode_ack_delay :: proc(conn: ^Conn, delay: time.Duration) -> u32 {
 	delay_us := int(delay) / 1000
 	delay_exp := conn.host_params.ack_delay_exponent
 	return u32(delay_us / (2 << delay_exp))
+}
+
+// TODO: This needs to be fast.
+// If you have 100,000 players updating 144 times/second,
+// this gets called 14.4 million times per second.
+/*
+  handle_lost_packets
+
+  Upon receipt of an Ack Frame, this function checks for lost packets. 
+  It iterates over the in-flight packets, which are pending acknowledgement,
+  and if any are declared lost it then queues those frames for retransmission.
+
+  It is local to the packet number space for which the acknowledgement was
+  received.
+
+  A packet is declared lost if:
+    + The packet is unacknowledged, in flight, and was sent prior to an
+      acknowledged packet, and
+    + The packet was sent kPacketThreshold packets before an
+	  acknowledged packet (Section 6.1.1), or it was sent long enough in
+	  the past (Section 6.1.2) in RFC 9002.
+
+  This function assumes that packet numbers are assigned iteratively with no gaps
+  in between.
+
+  largest_acked is the decoded packet number (the full 64 bit packet number)
+
+  receipt_time is the time we received acknowledgement of the most recently sent 
+  packet (the largest_acked).
+
+  WARNING: This procedure defers the responsibility of locking the Ack_State of 
+  the packet number space to the caller. The caller MUST acquire the lock 
+  to prevent data races.
+*/
+@(private = "file")
+handle_lost_packets :: proc(
+	conn: ^Conn,
+	path: net.Endpoint,
+	latest_rtt: time.Duration,
+	receipt_time: time.Tick,
+	packet_number_space: Packet_Number_Space,
+) {
+	ack_state := conn.acks[packet_number_space]
+
+	// get packet threshold
+	packet_threshold := ack_state.largest_acked - K_PACKET_THRESHOLD
+
+	// get time threshold
+	rtt := conn.paths[path].rtt
+	time_threshold := time.Duration(max(rtt.smoothed, latest_rtt))
+	time_threshold =
+		auto_cast K_TIME_THRESHOLD_NUMERATOR *
+		time_threshold /
+		K_TIME_THRESHOLD_DENOMINATOR
+	time_threshold = auto_cast max(time_threshold, K_GRANULARITY)
+
+	send := conn.send[packet_number_space]
+
+	for packet_number, ack in ack_state.pending {
+		if packet_number < packet_threshold ||
+		   time.tick_diff(ack.time_sent, receipt_time) < time_threshold {
+			// handle packet retransmission here
+
+			// we acquire the lock here so that we do not block application
+			// sending to the same client, especially in the case of
+			// congestion
+			sync.guard(&send.lock)
+
+			for frame in ack.frames {
+				append(&send.queue, frame)
+			}
+
+			delete(ack.frames)
+			delete_key(&ack_state.pending, packet_number)
+		}
+	}
+}
+
+// TODO: add handler for ECN counts
+/*
+  update_pending_acks
+
+  This procedure updates the ack states. It expects all packet numbers
+  to be fully decoded. It also expects all ack ranges to be sanity checked.
+  As such, it does not report a transport error.
+
+  This procedure also calls the procdure to update Round-Trip Time (RTT) state 
+  if the largest_acked packet was newly acknowledged and at least one of the 
+  packets is ack eliciting. 
+
+  This procedure also calls the procedure to handle lost packets if the largest
+  acknowledged packet is newly acknowledged.
+  
+  Please note that it locks the ack object.
+
+  Depending on the future architecture, this may change. It may assume that
+  processing of acks for a specific connection is partitioned to a single thread
+  and that acks are being read directly from an io_vec st. the values in the frame
+  need to be decoded within this procedure. 
+*/
+update_pending_acks :: proc(
+	conn: ^Conn,
+	path: net.Endpoint,
+	packet_number_space: Packet_Number_Space,
+	frame: ^Ack_Frame,
+	time_received: time.Tick,
+) {
+	ack_state := conn.acks[packet_number_space]
+	sync.guard(&ack_state.lock)
+
+	ack_eliciting: bool
+
+	// handle the largest_ack
+	// if the largest_ack is newly acked, then update rtt
+	// handle_lost_packets
+	defer if ack, newly_acked := ack_state.pending[frame.largest_ack];
+	   newly_acked {
+		latest_rtt := time.tick_diff(ack.time_sent, time_received)
+
+		// remove largest_acked from pending acks
+		ack_eliciting ||= ack.ack_eliciting
+		delete(ack.frames)
+		delete_key(&ack_state.pending, frame.largest_ack)
+
+		if ack_eliciting {
+			update_rtt(conn, path, latest_rtt, frame.ack_delay)
+		}
+
+		handle_lost_packets(
+			conn,
+			path,
+			latest_rtt,
+			time_received,
+			packet_number_space,
+		)
+	}
+
+	// handle the first ack_range
+	smallest_ack := frame.largest_ack - frame.first_ack_range
+	for packet_number in smallest_ack ..< frame.largest_ack {
+		if ack, newly_acked := ack_state.pending[packet_number]; newly_acked {
+			ack_eliciting ||= ack.ack_eliciting
+			delete(ack.frames)
+			delete_key(&ack_state.pending, packet_number)
+		}
+	}
+
+
+	// handle succeeding ack ranges
+	for gap, range_len := 0, 1;
+	    gap < len(frame.ack_ranges);
+	    gap, range_len = gap + 2, range_len + 2 {
+		largest_ack := smallest_ack - frame.ack_ranges[gap] - 2
+		smallest_ack = largest_ack - frame.ack_ranges[range_len]
+
+		for packet_number in smallest_ack ..= largest_ack {
+			if ack, newly_acked := ack_state.pending[packet_number]; newly_acked {
+				ack_eliciting ||= ack.ack_eliciting
+				delete(ack.frames)
+				delete_key(&ack_state.pending, packet_number)
+			}
+		}
+	}
 }

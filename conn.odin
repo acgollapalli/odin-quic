@@ -129,9 +129,13 @@ Conn :: struct {
 	encryption:                    Encryption_Context,
 	send_queue:                    [dynamic]Frame,
 	paths:                         Paths,
-	pending_acks:                  Pending_Acks,
-	lost_acks:                     Pending_Acks,
-	largest_acked:                 u64,
+	acks:                          Ack_State,
+	send:                          Send_State,
+}
+
+Send_State :: [Packet_Number_Space]struct {
+	lock:  sync.Mutex,
+	queue: [dynamic]^Frame,
 }
 
 // TODO: 
