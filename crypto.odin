@@ -71,13 +71,22 @@ Encryption_Level_Secrets :: union {
 Encryption_Context :: struct {
 	secrets: [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets,
 	ssl:     ssl.SSL_Connection,
-	lock:    sync.Mutex,
+	lock:    sync.RW_Mutex,
 }
 
 
 get_hp_key :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level) -> []byte {
 	hp_key: []byte
-	sync.mutex_guard(&conn.lock)
+
+	// We don't read anything that can change throughout the lifetime of the
+	// connection here, so we don't really NEED to get a reader-lock on the
+	// conn object
+	//sync.shared_guard(&conn.lock)
+
+	// however we DO read mutable state from the encryption context,
+	// and need to acquire that lock 
+	sync.shared_guard(&conn.encryption.lock)
+
 	secrets := conn.encryption.secrets[level]
 	switch s in secrets {
 	case Initial_Secret:
@@ -100,7 +109,7 @@ get_hp_key_and_algo :: proc(
 	Packet_Protection_Algorithm,
 ) {
 	hp_key: []byte
-	sync.mutex_guard(&conn.lock)
+	sync.shared_guard(&conn.encryption.lock)
 	secrets := conn.encryption.secrets[level]
 	cipher: Packet_Protection_Algorithm
 	switch s in secrets {
@@ -127,7 +136,7 @@ get_secret_iv_and_algo :: proc(
 	Packet_Protection_Algorithm,
 ) {
 	hp_key: []byte
-	sync.mutex_guard(&conn.lock)
+	sync.shared_guard(&conn.encryption.lock)
 	secrets := conn.encryption.secrets[level]
 	cipher: Packet_Protection_Algorithm
 	switch s in secrets {

@@ -4,10 +4,6 @@ SDG                                                                           JJ
 
                   Electronic Congestion Control
 
-  + Long Header packets that contain Crypto Frames must be acknowledged quicly
-  + Packets that contain anything besides Ack of Connection Close count for 
-    bytes in flight
-
   The ECC State lives in the Conn object under the Paths property:
     {
       ..
@@ -21,5 +17,6 @@ SDG                                                                           JJ
 
 
 package quic
+
 
 ECC_State :: struct {}

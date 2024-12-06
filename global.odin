@@ -58,7 +58,7 @@ open_conn_server :: proc(
 		role = config.role,
 		flow_enabled = true,
 		spin_enabled = rand.uint64() % 8 != 0,
-		lock = sync.Mutex{},
+		lock = sync.RW_Mutex{},
 		source_conn_ids = make(Connection_Ids, 100), // just overwrite them as you go and issue valid until for that conn_id
 		dest_conn_ids = make(Connection_Ids, 100),
 		encryption = Encryption_Context {
@@ -69,7 +69,7 @@ open_conn_server :: proc(
 				.Application_Encryption = nil,
 			},
 			ssl = libressl.SSL_new(Global_Context.ssl_context),
-			lock = sync.Mutex{},
+			lock = sync.RW_Mutex{},
 		},
 	}
 

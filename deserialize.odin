@@ -188,7 +188,7 @@ process_initial :: proc(
 	role: Role
 	hp_key: []byte
 	if conn := find_conn(dest_conn_id); conn != nil { 	// FIXME: REPLACE WITH ZII
-		sync.mutex_guard(&conn.lock)
+		sync.shared_guard(&conn.encryption.lock)
 		secrets := conn.encryption.secrets[.Initial_Encryption]
 		switch s in secrets {
 		case TLS_Secret:
