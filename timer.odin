@@ -128,7 +128,9 @@ reset_pto_timer :: proc(
 
   Handle when a PTO timer runs out.
   Increments the idle duration for the path and updates the PTO timer. Returns
-  true if the 
+  true if the idle timeout is less than the max idle timeout.
+
+  If this is the case, then the 
 
     + PTO timer expiry MUST NOT trigger retransmission of packets.
   
@@ -145,7 +147,8 @@ timeout_pto :: proc(
 		i64(pto_duration),
 	)
 
-	if time.Duration(new_timeout_duration) < conn.peer_params.max_idle_timeout {
+	if time.Duration(new_timeout_duration) <
+	   conn.peer_params.max_idle_timeout { 	// FIXME: This should be tracked on the main conn object as the min of both peer and host
 		set_pto_timer(conn, path, packet_number_space, pto_duration)
 		sync.atomic_add(&conn.paths[path].timeout.pto_backoff, 1)
 		return true
@@ -280,7 +283,9 @@ set_pto_timer :: proc(
 			timer,
 			pto_timer,
 		)
-		free(old_timer, alloc)
+		if old_timer != nil {
+			free(old_timer, alloc) // swapping in a new timer everytime may not be great
+		} // FIXME: Figure out if this is as safe as I thought
 	}
 }
 

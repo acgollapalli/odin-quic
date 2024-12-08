@@ -54,7 +54,9 @@ K_GRANULARITY :: time.Duration(#config(K_GRANULARITY, 1_000_000))
 
 // NOTE: We are NOT ACTUALLY expecting THREE HUNDRED AND THIRTY THREE
 // *MILLISECONDS*. Anything above 15 is bad, and above 30 utterly
-// unacceptable. But we'll follow the defaults for now.
+// unacceptable. But this allows for a PTO of ~1 sec, which is about
+// how long we can expect before we have to send a probe timeout to
+// check for liveness of the peer
 /*
    kGranularity:  Timer granularity.  This is a system-dependent value,
       and RFC9000 Section 6.1.2 recommends a value of 1 ms.
@@ -129,7 +131,7 @@ Pending_Ack :: struct {
 	frames:        []^Frame,
 	ack_eliciting: bool,
 	in_flight:     bool,
-	sent_bytes:    int,
+	sent_bytes:    u64,
 	time_sent:     time.Tick,
 }
 

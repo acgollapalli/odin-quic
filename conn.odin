@@ -132,11 +132,12 @@ Conn :: struct {
 	paths:                         Paths,
 	acks:                          Ack_State,
 	send:                          Send_State,
+	realtime:                      Send_State,
 }
 
 Send_State :: [Packet_Number_Space]struct {
 	lock:  sync.Mutex,
-	queue: [dynamic]^Frame,
+	queue: [dynamic]^Frame, // TODO: swap for ring buffer
 }
 
 
