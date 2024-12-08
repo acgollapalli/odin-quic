@@ -125,6 +125,7 @@ RTT_State :: struct {
 */
 Pending_Ack :: struct {
 	packet_number: u64,
+	path:          net.Endpoint,
 	frames:        []^Frame,
 	ack_eliciting: bool,
 	in_flight:     bool,
@@ -207,7 +208,6 @@ update_rtt :: proc(
 	sync.shared_guard(&conn.lock)
 
 	max_ack_delay := conn.peer_params.max_ack_delay
-
 
 	if path_state, path_ok := conn.paths[path]; path_ok {
 		if rtt := path_state.rtt; rtt != nil {
@@ -304,6 +304,9 @@ encode_ack_delay :: proc(conn: ^Conn, delay: time.Duration) -> u32 {
   receipt_time is the time we received acknowledgement of the most recently sent 
   packet (the largest_acked).
 
+  If the packet_number < largest_acknowledged packet_number but cannot be declared
+  lost, we set a timer to check if the packet is lost
+
   WARNING: This procedure defers the responsibility of locking the Ack_State of 
   the packet number space to the caller. The caller MUST acquire the lock 
   to prevent data races.
@@ -332,9 +335,16 @@ handle_lost_packets :: proc(
 
 	send := conn.send[packet_number_space]
 
+	loss_timer_pkt_num := ack_state.largest_acked
+	loss_timer_start_time: time.Tick
+	defer if loss_timer_pkt_num != ack_state.largest_acked {
+		set_loss_timer(conn, loss_timer_pkt_num, packet_number_space)
+	}
+
 	for packet_number, ack in ack_state.pending {
-		if packet_number < packet_threshold ||
-		   time.tick_diff(ack.time_sent, receipt_time) < time_threshold {
+		if ack.path == path &&
+		   (packet_number < packet_threshold ||
+				   time.tick_diff(ack.time_sent, receipt_time) < time_threshold) {
 			// handle packet retransmission here
 
 			// we acquire the lock here so that we do not block application
@@ -348,9 +358,14 @@ handle_lost_packets :: proc(
 
 			delete(ack.frames)
 			delete_key(&ack_state.pending, packet_number)
+		} else if packet_number < ack_state.largest_acked {
+			loss_timer_pkt_num = min(loss_timer_pkt_num, packet_number)
+			loss_timer_start_time = ack.time_sent
 		}
+
 	}
 }
+
 
 // TODO: add handler for ECN counts
 /*
@@ -393,6 +408,8 @@ update_pending_acks :: proc(
 	   newly_acked {
 		latest_rtt := time.tick_diff(ack.time_sent, time_received)
 
+		ack_state.largest_acked = max(frame.largest_ack, ack_state.largest_acked)
+
 		// remove largest_acked from pending acks
 		ack_eliciting ||= ack.ack_eliciting
 		delete(ack.frames)
@@ -400,6 +417,7 @@ update_pending_acks :: proc(
 
 		if ack_eliciting {
 			update_rtt(conn, path, latest_rtt, frame.ack_delay)
+			reset_pto_timer(conn, path, packet_number_space)
 		}
 
 		handle_lost_packets(

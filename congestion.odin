@@ -1,6 +1,6 @@
 /*
 
-SDG                                                                           JJ
+SDG                                                                            JJ
 
                   Electronic Congestion Control
 
@@ -13,10 +13,13 @@ SDG                                                                           JJ
   Where the Path is the network path of the peer, and the ECC_State
   is as defined below.
 
- */
+*/
 
 
 package quic
+
+import "core:sync"
+import "core:time"
 
 
 ECC_State :: struct {}

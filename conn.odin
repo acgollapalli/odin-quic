@@ -85,6 +85,7 @@ Path :: struct {
 	endpoint: net.Endpoint,
 	rtt:      ^RTT_State,
 	ecc:      ^ECC_State,
+	timeout:  ^Timer_State,
 	valid:    Path_Validation_State,
 }
 
@@ -137,6 +138,7 @@ Send_State :: [Packet_Number_Space]struct {
 	lock:  sync.Mutex,
 	queue: [dynamic]^Frame,
 }
+
 
 // TODO: 
 Conn_Config :: struct {
