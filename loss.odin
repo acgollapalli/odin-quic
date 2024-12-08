@@ -338,7 +338,16 @@ handle_lost_packets :: proc(
 	loss_timer_pkt_num := ack_state.largest_acked
 	loss_timer_start_time: time.Tick
 	defer if loss_timer_pkt_num != ack_state.largest_acked {
-		set_loss_timer(conn, loss_timer_pkt_num, packet_number_space)
+		loss_timer_timeout := time.Tick {
+			loss_timer_start_time._nsec + i64(time_threshold),
+		}
+		set_loss_timer(
+			conn,
+			path,
+			packet_number_space,
+			loss_timer_pkt_num,
+			loss_timer_timeout,
+		)
 	}
 
 	for packet_number, ack in ack_state.pending {

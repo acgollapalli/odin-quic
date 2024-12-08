@@ -21,6 +21,9 @@ import "core:net"
 import "core:sync"
 import "core:time"
 
+
+/* ---------------------------------- TYPES ---------------------------------- */
+
 /*
   Timer_Tag
 
@@ -68,16 +71,25 @@ Timer_State :: struct {
 	timers:        [Packet_Number_Space]^Timer,
 }
 
+/* ---------------------------- PUBLIC PROCEDURES ---------------------------- */
+
 /* set_loss_timer
 
   Sets a timer to check for loss if the packet is still pending
+
 */
 set_loss_timer :: proc(
 	conn: ^Conn,
-	packet_number: u64,
+	path: net.Endpoint,
 	packet_number_space: Packet_Number_Space,
+	packet_number: u64,
+	timeout: time.Tick,
 ) {
-	#assert(false, "Not Implemented Yet")
+	timer := make_packet_loss_timer(timeout, packet_number)
+	sync.atomic_exchange(
+		&conn.paths[path].timeout.timers[packet_number_space],
+		timer,
+	)
 }
 
 /*
@@ -112,68 +124,6 @@ reset_pto_timer :: proc(
 }
 
 /*
-  reset_pto_backoff
-
-  Resets the Probe Timeout backoff factor and the idle duration
-
-  This is only reset when receiving an acknowledgement from the peer.
-  It does not reset for the Initial packet number space, because the client
-  does not know whether the server considers its address valid.
-*/
-reset_pto_backoff :: proc(
-	conn: ^Conn,
-	path: net.Endpoint,
-	packet_number_space: Packet_Number_Space,
-) {
-	if packet_number_space != .Initial && conn.role != .Client {
-		sync.atomic_exchange(&conn.paths[path].timeout.pto_backoff, 0)
-	}
-	sync.atomic_exchange(&conn.paths[path].timeout.idle_duration, 0)
-}
-
-
-/*
-  calculate_pto
-
-  Calculates the timer that our timeout event needs to fire for a PTO
-  
-  If the packet_number space is Initial or Handshake, then the max_ack_delay
-  is disregarded, as these packets are not supposed to be delayed by the peer.
-
-  Every time that a PTO timer has fired off, the PTO duration is doubled. This 
-  is PTO backoff. This occurs until we receive an Ack frame from the peer.
-  The PTO backoff factor applies globally to all packet number spaces.
-  
- */
-calculate_pto_duration :: proc(
-	conn: ^Conn,
-	path: net.Endpoint,
-	packet_number_space: Packet_Number_Space,
-) -> time.Duration {
-	pto_backoff := sync.atomic_load(&conn.paths[path].timeout.pto_backoff)
-	rtt := conn.paths[path].rtt
-
-	sync.guard(&rtt.lock)
-
-	pto_duration: time.Duration
-	switch packet_number_space {
-	case .Initial, .Handshake:
-		// discard max_ack_delay
-		pto_duration = rtt.smoothed + max(4 * rtt.var, K_GRANULARITY)
-	case .Application:
-		pto_duration =
-			rtt.smoothed +
-			max(4 * rtt.var, K_GRANULARITY) +
-			conn.peer_params.max_ack_delay
-	}
-
-	// double pto_duration to account for PTO backoff
-	pto_duration *= 1 << pto_backoff
-
-	return pto_duration
-}
-
-/*
   timeout_pto
 
   Handle when a PTO timer runs out.
@@ -204,6 +154,49 @@ timeout_pto :: proc(
 	}
 }
 
+/* --------------------------- PRIVATE PROCEDURES ---------------------------- */
+
+/*
+  calculate_pto
+
+  Calculates the timer that our timeout event needs to fire for a PTO
+  
+  If the packet_number space is Initial or Handshake, then the max_ack_delay
+  is disregarded, as these packets are not supposed to be delayed by the peer.
+
+  Every time that a PTO timer has fired off, the PTO duration is doubled. This 
+  is PTO backoff. This occurs until we receive an Ack frame from the peer.
+  The PTO backoff factor applies globally to all packet number spaces.
+  
+ */
+@(private = "file")
+calculate_pto_duration :: proc(
+	conn: ^Conn,
+	path: net.Endpoint,
+	packet_number_space: Packet_Number_Space,
+) -> time.Duration {
+	pto_backoff := sync.atomic_load(&conn.paths[path].timeout.pto_backoff)
+	rtt := conn.paths[path].rtt
+
+	sync.guard(&rtt.lock)
+
+	pto_duration: time.Duration
+	switch packet_number_space {
+	case .Initial, .Handshake:
+		// discard max_ack_delay
+		pto_duration = rtt.smoothed + max(4 * rtt.var, K_GRANULARITY)
+	case .Application:
+		pto_duration =
+			rtt.smoothed +
+			max(4 * rtt.var, K_GRANULARITY) +
+			conn.peer_params.max_ack_delay
+	}
+
+	// double pto_duration to account for PTO backoff
+	pto_duration *= 1 << pto_backoff
+
+	return pto_duration
+}
 
 /* 
   make_packet_loss_timer
@@ -289,4 +282,25 @@ set_pto_timer :: proc(
 		)
 		free(old_timer, alloc)
 	}
+}
+
+/*
+  reset_pto_backoff
+
+  Resets the Probe Timeout backoff factor and the idle duration
+
+  This is only reset when receiving an acknowledgement from the peer.
+  It does not reset for the Initial packet number space, because the client
+  does not know whether the server considers its address valid.
+*/
+@(private = "file")
+reset_pto_backoff :: proc(
+	conn: ^Conn,
+	path: net.Endpoint,
+	packet_number_space: Packet_Number_Space,
+) {
+	if packet_number_space != .Initial && conn.role != .Client {
+		sync.atomic_exchange(&conn.paths[path].timeout.pto_backoff, 0)
+	}
+	sync.atomic_exchange(&conn.paths[path].timeout.idle_duration, 0)
 }
