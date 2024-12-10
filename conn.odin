@@ -128,11 +128,15 @@ Conn :: struct {
 	// end stream state
 	lock:                          sync.RW_Mutex,
 	encryption:                    Encryption_Context,
-	send_queue:                    [dynamic]Frame,
+	send_queue:                    [Packet_Number_Space]struct {
+		q:  [dynamic]Frame,
+		pn: u64,
+	},
 	paths:                         Paths,
 	acks:                          Ack_State,
 	send:                          Send_State,
 	realtime:                      Send_State,
+	endpoint:                      net.Endpoint,
 }
 
 Send_State :: [Packet_Number_Space]struct {

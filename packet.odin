@@ -111,3 +111,33 @@ get_dest_conn_id :: proc(packet: Packet) -> Connection_Id {
 	}
 	return nil
 }
+
+/*
+  make_packet
+
+  general purpose packetizer
+
+  serializes packet up to the max len of the slize provided,
+  moves the frames in question from the frame queue to the pending ack struct,
+  reads crypto data from the crypto queues (not implemented yet) and frames it
+  in stream frames 
+  reads stream data from the stream queues (not implemented yet) and frames 
+  them in stream frames. 
+
+  Don't use it for initial packets initiated as a client.
+  TODO: write `make_initiating_packet` which will pad packet to 1200 bytes
+*/
+make_packet :: proc(
+	conn: ^Conn,
+	packet_number_space: Packet_Number_Space,
+	dg_buf: []byte,
+	alloc := context.allocator,
+) -> (
+	pkt: Packet,
+	plen: int,
+) {
+	#assert(
+		false,
+		"Not implemented yet, because serialization was written with bad assumptions,",
+	)
+}

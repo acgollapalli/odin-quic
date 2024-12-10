@@ -10,7 +10,7 @@ import "core:math/rand"
 import "core:sync"
 
 /*
- * Glolbal Context Lives in this file
+ * Global Context Lives in this file
  * 
  * Use init to initialize it
  */
@@ -18,8 +18,15 @@ import "core:sync"
 Context_Type :: struct {
 	connections:            #soa[dynamic]Conn,
 	ssl_context:            ssl.SSL_Context,
+	thread_state:           Thread_State,
 	stateless_reset_tokens: map[[16]byte]Connection_Id,
 	lock:                   sync.Mutex,
+}
+
+Thread_State :: enum {
+	Go,
+	Pause,
+	Stop,
 }
 
 Global_Context: Context_Type
@@ -30,7 +37,7 @@ Pkey_Type :: #config(Pkey_Type, 1)
 
 init_quic_context :: proc() {
 	Global_Context = Context_Type { 	// do we even need this? it should init most of it to empty by default, right?
-		make(#soa[dynamic]Conn),
+		make(#soa[dynamic]Conn), // TODO: write destructor
 		ssl.create_ctx(
 			Cert_Path,
 			Pkey_Path,
@@ -106,6 +113,7 @@ find_conn_by_ssl :: proc(ssl: ssl.SSL_Connection) -> ^Conn {
 	// FIXME: Don't forget the guard
 	for &conn in Global_Context.connections {
 		if conn.encryption.ssl == ssl {
+			receive_allocator
 			return &conn
 		}
 	}
