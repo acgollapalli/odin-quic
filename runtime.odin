@@ -173,7 +173,7 @@ send_thread_task :: proc(sock: net.UDP_Socket) {
 		// debugging session and a profiler first to see where the hiccups are.
 		for &c in Global_Context.connections {
 			dglen: int
-			for pn_space in c.send_queue { 	// TODO: is there syntax to force unroll?
+			for pn_space in c.send { 	// TODO: is there syntax to force unroll?
 				pkt, plen := make_packet(c, pn_space, ctx.io_vecs[0][dglen:])
 			}
 			if dglen > 0 {
@@ -198,4 +198,5 @@ on_sendmsg :: proc(user: rawptr, sent: int, err: net.Network_Error) {
 	// send failures will be treated as lost packets and retransmitted.
 	// that may be slow, and it may be better to handle it here.
 	// I guess we'll just have to use this to handle errors
+	#assert(false, "Handle your errors properly")
 }

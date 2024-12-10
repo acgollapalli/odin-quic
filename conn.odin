@@ -74,7 +74,6 @@ Connection_Params :: struct {
   changes.
 
   On Reconnect, only the Address needs to be validated, not the port.
-  
   TODO: Should we add a timer here, or manage timers separately?
 
   Laytan kindly included some timer utils in his http package,
@@ -128,10 +127,6 @@ Conn :: struct {
 	// end stream state
 	lock:                          sync.RW_Mutex,
 	encryption:                    Encryption_Context,
-	send_queue:                    [Packet_Number_Space]struct {
-		q:  [dynamic]Frame,
-		pn: u64,
-	},
 	paths:                         Paths,
 	acks:                          Ack_State,
 	send:                          Send_State,
@@ -140,8 +135,11 @@ Conn :: struct {
 }
 
 Send_State :: [Packet_Number_Space]struct {
-	lock:  sync.Mutex,
-	queue: [dynamic]^Frame, // TODO: swap for ring buffer
+	lock:         sync.Mutex,
+	queue:        [dynamic]^Frame, // TODO: swap for ring buffer
+	crypto:       [4096]u8,
+	crypto_len:   int,
+	crypto_flush: bool,
 }
 
 

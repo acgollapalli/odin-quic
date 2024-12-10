@@ -11,6 +11,7 @@ import chacha_poly1305 "core:crypto/chacha20poly1305"
 import "core:crypto/hash"
 import "core:crypto/hkdf"
 import "core:encoding/hex"
+import "core:strings"
 import "core:sync"
 import "core:time"
 
@@ -36,15 +37,35 @@ Packet_Protection_Algorithm :: enum {
 	AEAD_CHACHA20_POLY1305,
 }
 
+get_cipher :: proc(cipher: libssl.SSL_CIPHER) -> Packet_Protection_Algorithm {
+	cipher_name := ssl.cipher_name(cipher)
+	switch cipher_name {
+	case "TLS_AES_128_GCM_SHA256":
+		return .AEAD_AES_128_GCM
+	case "TLS_AES_256_GCM_SHA384":
+		return .AEAD_AES_256_GCM
+	case "TLS_CHACHA20_POLY1305_SHA256":
+		return .AEAD_CHACHA20_POLY1305
+	}
+}
+
+
 TLS_Secret :: struct {
 	secret: []byte,
 	key:    []byte,
 	iv:     []byte,
 	hp:     []byte,
 	ku:     []byte,
-	valid:  bool,
+	valid:  bool, // soft "discarding of keys" ?
 	cipher: Packet_Protection_Algorithm,
 }
+
+Secret_Role :: enum {
+	Read,
+	Write,
+}
+
+TLS_Secrets :: [Secret_Role]TLS_Secret
 
 Initial_Secret :: struct {
 	secret:        []byte,
@@ -58,7 +79,7 @@ Initial_Secret :: struct {
 
 Encryption_Level_Secrets :: union {
 	Initial_Secret,
-	TLS_Secret,
+	TLS_Secrets,
 }
 
 
@@ -434,4 +455,98 @@ read_crypto_frame_data :: proc(
 	frame: ^Crypto_Frame, // FIXME: Should we be passing a ptr if we're not modifying
 ) {
 	ssl.provide_quic_data(conn.encryption.ssl, level, frame.crypto_data)
+}
+
+
+/* Quic method struct for libressl */
+add_handshake_data :: proc "c" (
+	ssl: ssl.SSL_Connection,
+	level: ssl.QUIC_Encryption_Level,
+	data: [^]byte,
+	dlen: u32,
+) -> i32 {
+	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+	q := conn.send[level]
+	sync.guard(q.lock)
+
+	for i := 0; i < dlen; i += 1 do q.crypto[q.crypto_len + i] = data[i]
+	q.crypto_len += dlen
+	return 1
+}
+
+flush_flight :: proc "c" (ssl: ssl.SSL_Connection) -> i32 {
+	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+	pns := conn.send
+	for q in pns {
+		sync.guard(q.lock)
+		q.crypto_flush = true // TODO: consider refactoring Send_State
+	}
+	return 1
+}
+
+send_alert :: proc "c" (
+	ssl: ssl.SSL_Connection,
+	level: ssl.QUIC_Encryption_Level,
+	alert: u8,
+) -> i32 {
+	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+	close_conn(conn, transmute(Transport_Error)alert)
+
+	return 1
+}
+
+set_read_secret :: proc "c" (
+	ssl: ssl.SSL_Connection,
+	level: ssl.QUIC_Encryption_Level,
+	cipher: libssl.SSL_CIPHER,
+	secret: [^]u8,
+	slen: i32,
+) -> i32 {
+	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+	e := conn.encryption.secrets[level][.Read]
+	if e == nil {
+		e = TLS_Secret {
+			cipher = get_cipher(cipher),
+		}
+		conn.encryption.secrets[level] = 3
+	}
+
+	sync.guard(e.lock)
+	e.secret = strings.string_from_pointer(secret, slen)
+	e.key = tlsv13_expand_label(e.secret, "quic key")
+	e.iv = tlsv13_expand_label(e.secret, "quic iv")
+	e.hp = tlsv13_expand_label(e.secret, "quic hp")
+	e.ku = tlsv13_expand_label(e.secret, "quic ku")
+}
+
+set_write_secret :: proc "c" (
+	ssl: ssl.SSL_Connection,
+	level: ssl.QUIC_Encryption_Level,
+	cipher: libssl.SSL_CIPHER,
+	secret: [^]u8,
+	slen: i32,
+) -> i32 {
+	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+	e := conn.encryption.secrets[level][.Write]
+	if e == nil {
+		e = TLS_Secret {
+			cipher = get_cipher(cipher),
+		}
+		conn.encryption.secrets[level] = 3
+	}
+
+	sync.guard(e.lock)
+	e.secret = strings.string_from_pointer(secret, slen)
+	e.key = tlsv13_expand_label(e.secret, "quic key")
+	e.iv = tlsv13_expand_label(e.secret, "quic iv")
+	e.hp = tlsv13_expand_label(e.secret, "quic hp")
+	e.ku = tlsv13_expand_label(e.secret, "quic ku")
+}
+
+Quic_Method :: libssl.SSL_QUIC_METHOD {
+	add_handshake_data = add_handshake_data,
+	flush_flight       = flush_flight,
+	send_alert         = send_alert,
+	set_read_secret    = set_read_secret,
+	set_write_secret   = set_write_secret,
 }
