@@ -4,6 +4,7 @@
 
 package quic
 
+Stream_Id :: distinct u64
 
 Stream :: union {
 	Sending_Stream,

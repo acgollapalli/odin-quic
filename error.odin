@@ -47,3 +47,18 @@ Transport_Error_Codes :: [Transport_Error][]i32 {
 	.VERSION_NEGOTIATION_ERROR = {0x11},
 	.CRYPTO_ERROR              = {0x0100, 0x01ff},
 }
+
+Application_Write_Error :: enum {
+	None,
+	Stream_Not_Found,
+	Stream_Data_Blocked,
+	Stream_Buffer_Full,
+	Stream_Closed,
+}
+
+Application_Read_Errors :: enum {
+	None,
+	Stream_Not_Found,
+	Stream_Buffer_Empty,
+	Stream_Closed,
+}

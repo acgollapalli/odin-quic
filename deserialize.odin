@@ -7,6 +7,7 @@ SDG                                                                            J
 package quic
 
 import ssl "../ssl"
+import "core:net"
 import "core:sync"
 
 Partial_Packet :: struct {
@@ -17,7 +18,7 @@ Partial_Packet :: struct {
 }
 
 
-handle_datagram :: proc(dg: []byte) {
+handle_datagram :: proc(dg: []byte, client: net.Endpoint) {
 	dest_conn_id: Connection_Id
 	conn: Maybe(^Conn) // we don't know the connn til we have the dest_conn_id
 

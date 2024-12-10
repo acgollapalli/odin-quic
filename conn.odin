@@ -126,7 +126,7 @@ Conn :: struct {
 	max_local_streams_limit_bi:    u64,
 	max_remote_streams_limit_bi:   u64,
 	// end stream state
-	lock:                          sync.RW_Mutex, // FIXME: I think we could use a futex here? or atomics
+	lock:                          sync.RW_Mutex,
 	encryption:                    Encryption_Context,
 	send_queue:                    [dynamic]Frame,
 	paths:                         Paths,
