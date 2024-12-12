@@ -120,7 +120,7 @@ init :: proc(role: Role, callbacks: Callbacks) {
   otherwise when it is possible to start sending application
   data.
 */
-On_Connection :: #type proc(conn_id: Connection_ID, err: Transport_Error)
+On_Connection :: #type proc(conn_id: Connection_Id, err: Transport_Error)
 
 /*
   quic.create_connection
@@ -257,7 +257,7 @@ read_stream_readable :: proc(
   You have 2^60 -1 streams, of the sending, receiving, and bidirectional sort,
   so use them freely.
 */
-quic.stream_finish :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
+stream_finish :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
 	#assert(false, "Not Implemented Yet")
 }
 

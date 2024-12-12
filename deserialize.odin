@@ -190,22 +190,11 @@ process_initial :: proc(
 	hp_key: []byte
 	if conn := find_conn(dest_conn_id); conn != nil { 	// FIXME: REPLACE WITH ZII
 		sync.shared_guard(&conn.encryption.lock)
-		secrets := conn.encryption.secrets[.Initial_Encryption]
-		switch s in secrets {
-		case TLS_Secret:
-			hp_key = s.hp
-		case Initial_Secret:
-			role = conn.role
-			if role != .Server {
-				hp_key = s.client_hp // I THINK this is right
-			} else {
-				hp_key = s.server_hp // FIXME: Use examples in RFC to PROVE this is right
-			}
-		}
+		hp_key := conn.encryption.secrets[.Initial_Encryption][.Read].hp
 	} else {
 		// FIXME: we should CONSIDER adding the conn here (BUT... it's based off the dest id, so do we NEED TO? maybe it should be handled by the frame handler, not down here)
 		secrets := determine_initial_secret(dest_conn_id)
-		hp_key = secrets.client_hp
+		hp_key = secrets[.Read].hp
 	}
 
 
@@ -263,9 +252,10 @@ process_handshake :: proc(
 			packet[4:20],
 			conn,
 			ssl.QUIC_Encryption_Level.Handshake_Encryption,
+			Secret_Role.Read,
 		)
 	} else {
-		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
+		return nil, nil, .PROTOCOL_VIOLATION
 	}
 
 	// FIXME: Remove packet protection HERE
@@ -366,6 +356,7 @@ process_zero_rtt :: proc(
 			packet[4:20],
 			conn,
 			ssl.QUIC_Encryption_Level.Early_Data_Encryption,
+			Secret_Role.Read,
 		)
 	} else {
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
@@ -413,6 +404,7 @@ process_one_rtt :: proc(
 			packet[4:20],
 			conn,
 			ssl.QUIC_Encryption_Level.Application_Encryption,
+			Secret_Role.Read,
 		)
 	} else {
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah

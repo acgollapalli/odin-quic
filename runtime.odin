@@ -50,7 +50,7 @@ MIN_TIMER_THREADS, MAX_TIMER_THREADS ::
 PORT :: #config(PORT, 8443)
 ADDRESS :: #config(ADDRESS, "127.0.0.1")
 
-MAX_DATAGRAM_SIZE :: #config(MAX_DGRAM_SIZE, 4096)
+MAX_DGRAM_SIZE :: #config(MAX_DGRAM_SIZE, 4096)
 INIT_RECV_BUFS :: #config(INIT_RECV_BUFS, 100)
 IO_BUFS_LENGTH :: 100 // subject to change
 PACKETS_LENGTH :: 100
@@ -70,21 +70,7 @@ init_runtime :: proc(address := ADDRESS, port := PORT) {
 	address := net.parse_address(ADDRESS)
 	fmt.assertf(address != nil, "Error parsing connection params: %v", ADDRESS)
 
-	address_family := net.family_from_address(address)
 	endpoint := net.Endpoint{address, PORT}
-
-	sock, err := nbio.open_socket(&server.io, address_family, .UDP)
-	socket := sock.(net.UDP_Socket)
-
-	// bind socket
-	if err = net.bind(socket, endpoint); err != nil {
-		net.close(socket)
-		return
-	}
-
-	fmt.assertf(err == nil, "Error opening socket: %v", err)
-	server.sock = socket
-
 
 	init_quic_context()
 
@@ -96,28 +82,47 @@ init_runtime :: proc(address := ADDRESS, port := PORT) {
 /* Receiving Datagrams */
 
 Recvmsg_Ctx :: struct {
-	io:      net.io,
+	io:      nbio.IO,
 	name:    [80]byte, // should
-	io_vecs: [1][MAX_DATAGAM_SIZE]byte,
+	io_vecs: [1][MAX_DGRAM_SIZE]byte,
 	sock:    net.UDP_Socket,
 }
 
-receive_thread_task :: proc(sock: net.UDP_Socket) {
+
+// setting the IO here means that we may or may not
+// be able to have multiple threads reading from the
+// same port. On linux, you can use SO_REUSEPORT, and on
+// posix, you can use SO_REUSEADDR, or we can just use
+// different ports and direct applications to different
+// ports via the preferred address param in the handshake.
+// frenkly it's a tomorrow problme.
+// TODO: figure out how to handle multithreading given
+// socket binding issues.
+receive_thread_task :: proc(endpoint: net.Endpoint) {
 	ctx: Recvmsg_Ctx
-	ctx.sock = sock
 
 	nbio.init(&ctx.io)
 	defer nbio.destroy(&ctx.io)
 
+	address_family := net.family_from_address(endpoint.address)
+	sock, err := nbio.open_socket(&ctx.io, address_family, .UDP)
+	ctx.sock = sock.(net.UDP_Socket)
+
+	if err = net.bind(ctx.sock, endpoint); err != nil {
+		net.close(ctx.sock)
+		return
+	}
+
+	fmt.assertf(err == nil, "Error opening socket: %v", err)
 	io_err: os.Errno
 
-	read_datagram(&ctx, sock, alloc)
+	nbio.recvmsg(&ctx.io, ctx.name[:], ctx.io_vecs[:], &ctx, on_recvmsg)
 
 	for go := Global_Context.thread_state;
 	    go != .Stop && io_err == os.ERROR_NONE; {
 		if go == .Pause do continue
 
-		nbio.tick()
+		nbio.tick(&ctx.io)
 	}
 }
 
@@ -134,14 +139,16 @@ on_recvmsg :: proc(
 	received: int,
 	err: net.Network_Error,
 ) {
-	ctx := transmute(^UDP_Ctx)ctx
+	ctx := transmute(^Recvmsg_Ctx)ctx
 	name := string(ctx.name[:name_len])
 	peer, parse_ok := net.parse_endpoint(name)
 
 	if err == nil && parse_ok {
-		handle_datagram(ctx.buf[:received], peer)
+		// FIXME: handle_datagram expects a regular slice instead of
+		// io_vecs so we only have a single buffer right now
+		handle_datagram(ctx.io_vecs[0][:received], peer)
 	} else {
-		if err do fmt.printfln("Error receiving from client: %v", err)
+		if err != nil do fmt.printfln("Error receiving from client: %v", err)
 		if !parse_ok do fmt.printfln("Error reading peer path: %v", name)
 	}
 
@@ -150,8 +157,8 @@ on_recvmsg :: proc(
 
 /* Sending Datagrams */
 Sendmsg_Ctx :: struct {
-	io:      net.io,
-	io_vecs: [1][MAX_DATAGAM_SIZE]byte,
+	io:      nbio.IO,
+	io_vecs: [1][MAX_DGRAM_SIZE]byte,
 	sock:    net.UDP_Socket,
 }
 send_thread_task :: proc(sock: net.UDP_Socket) {
@@ -173,8 +180,8 @@ send_thread_task :: proc(sock: net.UDP_Socket) {
 		// debugging session and a profiler first to see where the hiccups are.
 		for &c in Global_Context.connections {
 			dglen: int
-			for pn_space in c.send { 	// TODO: is there syntax to force unroll?
-				pkt, plen := make_packet(c, pn_space, ctx.io_vecs[0][dglen:])
+			for pn_space, p in c.send { 	// TODO: is there syntax to force unroll?
+				pkt, plen := make_packet(c, p, ctx.io_vecs[0][dglen:])
 			}
 			if dglen > 0 {
 				nbio.sendmsg(
@@ -187,7 +194,7 @@ send_thread_task :: proc(sock: net.UDP_Socket) {
 				)
 			}
 		}
-		nbio.tick()
+		nbio.tick(&ctx.io)
 	}
 }
 

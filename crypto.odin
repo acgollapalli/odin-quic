@@ -4,7 +4,7 @@
 
 package quic
 
-import ssl "../ssl"
+import "base:runtime"
 import "core:crypto/aes"
 import chacha "core:crypto/chacha20"
 import chacha_poly1305 "core:crypto/chacha20poly1305"
@@ -14,6 +14,8 @@ import "core:encoding/hex"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import "net:ssl"
+import libressl "net:ssl/bindings"
 
 hex_decode_const :: proc(str: string) -> []u8 {
 	out, err := hex.decode(raw_data(str)[:len(str)])
@@ -37,7 +39,9 @@ Packet_Protection_Algorithm :: enum {
 	AEAD_CHACHA20_POLY1305,
 }
 
-get_cipher :: proc(cipher: libssl.SSL_CIPHER) -> Packet_Protection_Algorithm {
+get_cipher :: proc "c" (
+	cipher: ssl.SSL_CIPHER,
+) -> Packet_Protection_Algorithm {
 	cipher_name := ssl.cipher_name(cipher)
 	switch cipher_name {
 	case "TLS_AES_128_GCM_SHA256":
@@ -47,11 +51,12 @@ get_cipher :: proc(cipher: libssl.SSL_CIPHER) -> Packet_Protection_Algorithm {
 	case "TLS_CHACHA20_POLY1305_SHA256":
 		return .AEAD_CHACHA20_POLY1305
 	}
+	return nil
 }
 
 
 TLS_Secret :: struct {
-	secret: []byte,
+	//	secret: []byte,
 	key:    []byte,
 	iv:     []byte,
 	hp:     []byte,
@@ -65,38 +70,30 @@ Secret_Role :: enum {
 	Write,
 }
 
-TLS_Secrets :: [Secret_Role]TLS_Secret
-
-Initial_Secret :: struct {
-	secret:        []byte,
-	client_secret: []byte,
-	server_secret: []byte,
-	client_hp:     []byte,
-	server_hp:     []byte,
-	valid:         bool,
-	cipher:        Packet_Protection_Algorithm,
-}
-
-Encryption_Level_Secrets :: union {
-	Initial_Secret,
-	TLS_Secrets,
+PN_Spaces := [ssl.QUIC_Encryption_Level]Packet_Number_Space {
+	.Initial_Encryption     = .Initial,
+	.Handshake_Encryption   = .Handshake,
+	.Early_Data_Encryption  = .Application,
+	.Application_Encryption = .Application,
 }
 
 
 /*
- *  ssl_encryption_level_t comes from "ssl"
- *
  *  This context has an Encryption_Level_Secrets object
  *  for each level
  */
 Encryption_Context :: struct {
-	secrets: [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets,
+	secrets: [ssl.QUIC_Encryption_Level][Secret_Role]TLS_Secret,
 	ssl:     ssl.SSL_Connection,
 	lock:    sync.RW_Mutex,
 }
 
 
-get_hp_key :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level) -> []byte {
+get_hp_key :: proc(
+	conn: ^Conn,
+	level: ssl.QUIC_Encryption_Level,
+	role: Secret_Role,
+) -> []byte {
 	hp_key: []byte
 
 	// We don't read anything that can change throughout the lifetime of the
@@ -107,50 +104,29 @@ get_hp_key :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level) -> []byte {
 	// however we DO read mutable state from the encryption context,
 	// and need to acquire that lock 
 	sync.shared_guard(&conn.encryption.lock)
-
-	secrets := conn.encryption.secrets[level]
-	switch s in secrets {
-	case Initial_Secret:
-		if conn.role == .Client {
-			hp_key = s.server_hp
-		} else {
-			hp_key = s.client_hp
-		}
-	case TLS_Secret:
-		hp_key = s.hp
-	}
-	return hp_key
+	s := conn.encryption.secrets[level][role]
+	assert(s.valid, "invalid secret!")
+	return s.hp
 }
 
 get_hp_key_and_algo :: proc(
 	conn: ^Conn,
 	level: ssl.QUIC_Encryption_Level,
+	role: Secret_Role,
 ) -> (
 	[]byte,
 	Packet_Protection_Algorithm,
 ) {
-	hp_key: []byte
 	sync.shared_guard(&conn.encryption.lock)
-	secrets := conn.encryption.secrets[level]
-	cipher: Packet_Protection_Algorithm
-	switch s in secrets {
-	case Initial_Secret:
-		if conn.role == .Client {
-			hp_key = s.server_hp
-		} else {
-			hp_key = s.client_hp
-		}
-		cipher = s.cipher
-	case TLS_Secret:
-		hp_key = s.hp
-		cipher = s.cipher
-	}
-	return hp_key, cipher
+	s := conn.encryption.secrets[level][role]
+	assert(s.valid, "invalid secret!")
+	return s.hp, s.cipher
 }
 
 get_secret_iv_and_algo :: proc(
 	conn: ^Conn,
 	level: ssl.QUIC_Encryption_Level,
+	role: Secret_Role,
 ) -> (
 	[]byte,
 	[]byte,
@@ -158,23 +134,9 @@ get_secret_iv_and_algo :: proc(
 ) {
 	hp_key: []byte
 	sync.shared_guard(&conn.encryption.lock)
-	secrets := conn.encryption.secrets[level]
-	cipher: Packet_Protection_Algorithm
-	switch s in secrets {
-	case Initial_Secret:
-		secret: []u8
-		if conn.role == .Client {
-			secret = s.client_secret
-		} else {
-			secret = s.server_secret
-		}
-		key := tlsv13_expand_label(secret, "quic key")
-		iv := tlsv13_expand_label(secret, "quic iv")
-		return key, iv, s.cipher
-	case TLS_Secret:
-		return s.key, s.iv, s.cipher
-	}
-	return nil, nil, nil
+	s := conn.encryption.secrets[level][role]
+	assert(s.valid, "invalid secret!")
+	return s.key, s.iv, s.cipher
 }
 
 // header protection
@@ -187,7 +149,7 @@ get_secret_iv_and_algo :: proc(
  */
 get_header_mask :: proc {
 	get_header_mask_proper,
-	get_header_mask_w_ssl,
+	get_header_mask_w_conn,
 }
 
 get_header_mask_proper :: proc(
@@ -206,12 +168,13 @@ get_header_mask_proper :: proc(
 	return mask
 }
 
-get_header_mask_w_ssl :: proc(
+get_header_mask_w_conn :: proc(
 	sample: []u8,
 	conn: ^Conn,
 	encryption_level: ssl.QUIC_Encryption_Level,
+	role: Secret_Role,
 ) -> []byte {
-	hp_key, algo := get_hp_key_and_algo(conn, encryption_level)
+	hp_key, algo := get_hp_key_and_algo(conn, encryption_level, role)
 	return get_header_mask_proper(hp_key, sample, algo)
 }
 
@@ -339,27 +302,55 @@ tlsv13_expand_label :: proc(
 determine_initial_secret :: proc(
 	dest_conn_id: []byte,
 	salt := Initial_v1_Salt,
-) -> Initial_Secret {
+) -> [Secret_Role]TLS_Secret {
 	// can you allocate multiple values at once this way?
-	initial_secret := make([]u8, 256)
-	hkdf.extract(hash.Algorithm.SHA256, salt, dest_conn_id, initial_secret)
+	initial_secret: [256]u8
+	hkdf.extract(hash.Algorithm.SHA256, salt, dest_conn_id, initial_secret[:])
 
-	client := tlsv13_expand_label(initial_secret, "client in")
-	server := tlsv13_expand_label(initial_secret, "server in")
+	client := tlsv13_expand_label(initial_secret[:], "client in")
+	server := tlsv13_expand_label(initial_secret[:], "server in")
 	client_hp := tlsv13_expand_label(client, "quic hp")
 	server_hp := tlsv13_expand_label(server, "quic hp")
+	client_iv := tlsv13_expand_label(client, "quic iv")
+	server_iv := tlsv13_expand_label(server, "quic iv")
 
-	return Initial_Secret {
-		initial_secret,
-		client,
-		server,
-		client_hp,
-		server_hp,
-		true,
-		.AEAD_AES_128_GCM,
-	}
+	secret: [Secret_Role]TLS_Secret
+
+	// only connections in the server role ever call this function
+	// so we know that .Read is the client secret
+	secret[.Read].key = client
+	secret[.Read].hp = client_hp
+	secret[.Read].iv = client_iv
+	secret[.Read].valid = true // maybe need to deprecate
+	secret[.Read].cipher = .AEAD_AES_128_GCM // always this for initial
+
+	secret[.Write].key = server
+	secret[.Write].hp = server_hp
+	secret[.Write].iv = server_iv
+	secret[.Write].valid = true // maybe need to deprecate
+	secret[.Write].cipher = .AEAD_AES_128_GCM // always this for initial
+
+	return secret
 }
 
+destroy_secret :: proc(secret: TLS_Secret) {
+	d_if := proc(s: []byte) {
+		if s != nil {
+			delete(s)
+		}
+	}
+
+	d_if(secret.key)
+	d_if(secret.hp)
+	d_if(secret.iv)
+	d_if(secret.ku)
+}
+
+destroy_encryption :: proc(conn: ^Conn) {
+	// delete all keys
+	// delete ssl connection
+	#assert(false, "not implemented")
+}
 
 /*
  *  Apply packet proection. see RFC9001.5
@@ -395,16 +386,28 @@ protect_payload :: proc(
 	payload: []u8
 	#partial switch p in packet {
 	case Initial_Packet:
-		key, iv, algo := get_secret_iv_and_algo(conn, .Initial_Encryption)
+		key, iv, algo := get_secret_iv_and_algo(conn, .Initial_Encryption, .Write)
 		nonce = get_nonce(iv, p.packet_number)
 	case Zero_RTT_Packet:
-		key, iv, algo := get_secret_iv_and_algo(conn, .Early_Data_Encryption)
+		key, iv, algo := get_secret_iv_and_algo(
+			conn,
+			.Early_Data_Encryption,
+			.Write,
+		)
 		nonce = get_nonce(iv, p.packet_number)
 	case Handshake_Packet:
-		key, iv, algo := get_secret_iv_and_algo(conn, .Handshake_Encryption)
+		key, iv, algo := get_secret_iv_and_algo(
+			conn,
+			.Handshake_Encryption,
+			.Write,
+		)
 		nonce = get_nonce(iv, p.packet_number)
 	case One_RTT_Packet:
-		key, iv, algo := get_secret_iv_and_algo(conn, .Application_Encryption)
+		key, iv, algo := get_secret_iv_and_algo(
+			conn,
+			.Application_Encryption,
+			.Write,
+		)
 		nonce = get_nonce(iv, p.packet_number)
 	case Retry_Packet:
 		key = Retry_v1_Key
@@ -457,93 +460,103 @@ read_crypto_frame_data :: proc(
 	ssl.provide_quic_data(conn.encryption.ssl, level, frame.crypto_data)
 }
 
-
-/* Quic method struct for libressl */
+/* Quic method struct for ssl */
 add_handshake_data :: proc "c" (
-	ssl: ssl.SSL_Connection,
-	level: ssl.QUIC_Encryption_Level,
+	ssl_conn: ssl.SSL_Connection,
+	level: libressl.ssl_encryption_level_t,
 	data: [^]byte,
-	dlen: u32,
+	dlen: uint,
 ) -> i32 {
-	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
-	q := conn.send[level]
-	sync.guard(q.lock)
+	context = runtime.default_context()
+	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	l := transmute(ssl.QUIC_Encryption_Level)level
 
-	for i := 0; i < dlen; i += 1 do q.crypto[q.crypto_len + i] = data[i]
+	q := conn.send[PN_Spaces[l]]
+	sync.guard(&q.lock)
+
+	for i := 0; i < int(dlen); i += 1 do q.crypto[q.crypto_len + uint(i)] = data[i]
 	q.crypto_len += dlen
 	return 1
 }
 
-flush_flight :: proc "c" (ssl: ssl.SSL_Connection) -> i32 {
-	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
+flush_flight :: proc "c" (ssl_conn: ssl.SSL_Connection) -> i32 {
+	context = runtime.default_context()
+	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
 	pns := conn.send
-	for q in pns {
-		sync.guard(q.lock)
+	for &q in pns {
+		sync.guard(&q.lock)
 		q.crypto_flush = true // TODO: consider refactoring Send_State
 	}
 	return 1
 }
 
 send_alert :: proc "c" (
-	ssl: ssl.SSL_Connection,
-	level: ssl.QUIC_Encryption_Level,
+	ssl_conn: ssl.SSL_Connection,
+	level: libressl.ssl_encryption_level_t,
 	alert: u8,
 ) -> i32 {
-	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
-	close_conn(conn, transmute(Transport_Error)alert)
+	context = runtime.default_context()
+	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	context = runtime.default_context()
+	close_conn(conn, transmute(Transport_Error)int(alert))
 
 	return 1
 }
 
 set_read_secret :: proc "c" (
-	ssl: ssl.SSL_Connection,
-	level: ssl.QUIC_Encryption_Level,
-	cipher: libssl.SSL_CIPHER,
+	ssl_conn: ssl.SSL_Connection,
+	level: libressl.ssl_encryption_level_t,
+	cipher: ssl.SSL_CIPHER,
 	secret: [^]u8,
-	slen: i32,
+	slen: uint,
 ) -> i32 {
-	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
-	e := conn.encryption.secrets[level][.Read]
-	if e == nil {
+	context = runtime.default_context()
+	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	l := transmute(ssl.QUIC_Encryption_Level)level
+
+	e := conn.encryption.secrets[l][.Read]
+	if !e.valid {
 		e = TLS_Secret {
 			cipher = get_cipher(cipher),
 		}
-		conn.encryption.secrets[level] = 3
+		conn.encryption.secrets[l][.Read] = e
 	}
 
-	sync.guard(e.lock)
-	e.secret = strings.string_from_pointer(secret, slen)
-	e.key = tlsv13_expand_label(e.secret, "quic key")
-	e.iv = tlsv13_expand_label(e.secret, "quic iv")
-	e.hp = tlsv13_expand_label(e.secret, "quic hp")
-	e.ku = tlsv13_expand_label(e.secret, "quic ku")
+	sync.guard(&conn.encryption.lock)
+	e.key = tlsv13_expand_label(secret[:slen], "quic key")
+	e.iv = tlsv13_expand_label(secret[:slen], "quic iv")
+	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
+	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
+	e.valid = true
 }
 
 set_write_secret :: proc "c" (
-	ssl: ssl.SSL_Connection,
-	level: ssl.QUIC_Encryption_Level,
-	cipher: libssl.SSL_CIPHER,
+	ssl_conn: ssl.SSL_Connection,
+	level: libressl.ssl_encryption_level_t,
+	cipher: ssl.SSL_CIPHER,
 	secret: [^]u8,
-	slen: i32,
+	slen: uint,
 ) -> i32 {
-	conn := find_conn(ssl) // TODO: make SSL init fn w/ a ptr to conn
-	e := conn.encryption.secrets[level][.Write]
-	if e == nil {
+	context = runtime.default_context()
+	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	l := transmute(ssl.QUIC_Encryption_Level)level
+	e := conn.encryption.secrets[l][.Write]
+	if !e.valid {
 		e = TLS_Secret {
 			cipher = get_cipher(cipher),
 		}
-		conn.encryption.secrets[level] = 3
+		conn.encryption.secrets[l][.Write] = e
 	}
 
-	sync.guard(e.lock)
-	e.secret = strings.string_from_pointer(secret, slen)
-	e.key = tlsv13_expand_label(e.secret, "quic key")
-	e.iv = tlsv13_expand_label(e.secret, "quic iv")
-	e.hp = tlsv13_expand_label(e.secret, "quic hp")
-	e.ku = tlsv13_expand_label(e.secret, "quic ku")
+	sync.guard(&conn.encryption.lock)
+	e.key = tlsv13_expand_label(secret[:slen], "quic key")
+	e.iv = tlsv13_expand_label(secret[:slen], "quic iv")
+	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
+	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
+	e.valid = true
 }
 
-Quic_Method :: libssl.SSL_QUIC_METHOD {
+Quic_Method :: ssl.SSL_QUIC_METHOD {
 	add_handshake_data = add_handshake_data,
 	flush_flight       = flush_flight,
 	send_alert         = send_alert,

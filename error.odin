@@ -56,7 +56,7 @@ Application_Write_Error :: enum {
 	Stream_Closed,
 }
 
-Application_Read_Errors :: enum {
+Application_Read_Error :: enum {
 	None,
 	Stream_Not_Found,
 	Stream_Buffer_Empty,

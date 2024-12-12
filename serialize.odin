@@ -297,11 +297,12 @@ apply_header_protection :: proc(
 		return
 	}
 
-	hp_key := get_hp_key(conn, encryption_level)
+	hp_key := get_hp_key(conn, encryption_level, .Write)
 	mask := get_header_mask(
 		packet[pkt_number_index + 4:pkt_number_index + 20],
 		conn,
 		encryption_level,
+		Secret_Role.Write,
 	)
 
 	packet_number_bytes := packet[pkt_number_index:pkt_number_index +

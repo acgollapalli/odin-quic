@@ -44,6 +44,7 @@ init_quic_context :: proc() {
 			ssl.Certificate(Cert_Type),
 			ssl.Certificate(Pkey_Type),
 		), // FIXME: We need to be able to get certs out of some kind of config
+		.Go,
 		map[[16]byte]Connection_Id{},
 		sync.Mutex{},
 	}
@@ -51,36 +52,31 @@ init_quic_context :: proc() {
 
 open_conn_server :: proc(
 	config: Conn_Config,
-	initial_secrets: Encryption_Level_Secrets,
-	early_data_secrets: Encryption_Level_Secrets = nil,
+	initial_secrets: [Secret_Role]TLS_Secret,
 ) {
 	sync.mutex_guard(&Global_Context.lock) // acquire lock and release it when done
 
 
 	// add it to Global_Context
 	conn := Conn {
-		send_max_data = config.send_limit,
+		send_max_data    = config.send_limit,
 		receive_max_data = config.receive_limit,
-		version = .QUICv1,
-		role = config.role,
-		flow_enabled = true,
-		spin_enabled = rand.uint64() % 8 != 0,
-		lock = sync.RW_Mutex{},
-		source_conn_ids = make(Connection_Ids, 100), // just overwrite them as you go and issue valid until for that conn_id
-		dest_conn_ids = make(Connection_Ids, 100),
-		encryption = Encryption_Context {
-			secrets = [ssl.QUIC_Encryption_Level]Encryption_Level_Secrets {
-				.Initial_Encryption = initial_secrets,
-				.Early_Data_Encryption = early_data_secrets,
-				.Handshake_Encryption = nil,
-				.Application_Encryption = nil,
-			},
-			ssl = libressl.SSL_new(Global_Context.ssl_context),
-			lock = sync.RW_Mutex{},
-		},
+		version          = .QUICv1,
+		role             = config.role,
+		flow_enabled     = true,
+		spin_enabled     = rand.uint64() % 8 != 0,
+		lock             = sync.RW_Mutex{},
+		source_conn_ids  = make(Connection_Ids, 100), // just overwrite them as you go and issue valid until for that conn_id
+		dest_conn_ids    = make(Connection_Ids, 100),
 	}
 
+	conn.encryption.secrets[.Initial_Encryption] = initial_secrets
+
 	append(&Global_Context.connections, conn)
+}
+
+create_conn :: proc(p: Packet) -> ^Conn {
+	#assert(false, "not implemented")
 }
 
 // FIXME: IMPLEMENT
@@ -88,14 +84,17 @@ open_conn_server :: proc(
 // Any subsequent packets are dropped.
 // nothing else is added to the queue
 close_conn :: proc(conn: ^Conn, error: Transport_Error) {
+	defer destroy_conn(conn)
 
+	#assert(false, "not implemented")
 }
 
 queue_close_conn :: proc(conn: ^Conn, error: Transport_Error) {
 
+	#assert(false, "not implemented")
 }
 
-// FIXME: write this function
+// FIXME: replace with hashmap
 find_conn_by_dest_conn_id :: proc(id: Connection_Id) -> ^Conn {
 	// FIXME: Don't forget the guard
 	for &conn in Global_Context.connections {
@@ -109,18 +108,18 @@ find_conn_by_dest_conn_id :: proc(id: Connection_Id) -> ^Conn {
 }
 
 // FIXME: write this function
-find_conn_by_ssl :: proc(ssl: ssl.SSL_Connection) -> ^Conn {
-	// FIXME: Don't forget the guard
-	for &conn in Global_Context.connections {
-		if conn.encryption.ssl == ssl {
-			receive_allocator
-			return &conn
-		}
-	}
-	return nil
+find_conn_by_ssl :: proc "contextless" (
+	ssl_conn: ssl.SSL_Connection,
+) -> ^Conn {
+	return transmute(^Conn)ssl.get_app_data(ssl_conn)
 }
 
 find_conn :: proc {
 	find_conn_by_dest_conn_id,
 	find_conn_by_ssl,
+}
+
+
+destroy_conn :: proc(conn: ^Conn) {
+	destroy_encryption(conn)
 }

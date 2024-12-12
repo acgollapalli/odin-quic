@@ -138,7 +138,7 @@ Send_State :: [Packet_Number_Space]struct {
 	lock:         sync.Mutex,
 	queue:        [dynamic]^Frame, // TODO: swap for ring buffer
 	crypto:       [4096]u8,
-	crypto_len:   int,
+	crypto_len:   uint,
 	crypto_flush: bool,
 }
 

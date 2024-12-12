@@ -51,7 +51,7 @@ New_Reno_State :: struct {
 	threshold:       u64,
 	window:          u64,
 	bytes_in_flight: u64,
-	last_send:       time.Tick,
+	last_send:       i64, //time.Tick,
 }
 
 New_Reno_CC_State :: enum {
@@ -135,7 +135,7 @@ new_reno_handle_recovery :: proc(
 ) {
 	recovery_start := sync.atomic_load(&ecc.recovery_start)
 
-	if (ack.time_sent > recovery_start) {
+	if (ack.time_sent._nsec > recovery_start) {
 		sync.atomic_exchange(&ecc.state, .Congestion_Avoidance)
 	}
 }
@@ -219,8 +219,8 @@ new_reno_on_packet_loss :: proc(ecc: ^New_Reno_State, ack_state: ^Ack_State) {
 new_reno_enter_recovery :: proc(ecc: ^New_Reno_State) {
 	min_window := sync.atomic_load(&ecc.min_window)
 	window := max(sync.atomic_load(&ecc.window) / 2, min_window)
-	sync.atomic_store(&sec.threshold, window)
-	sync.atomic_store(&sec.window, window)
+	sync.atomic_store(&ecc.threshold, window)
+	sync.atomic_store(&ecc.window, window)
 }
 
 /*
@@ -244,8 +244,8 @@ new_reno_enter_recovery :: proc(ecc: ^New_Reno_State) {
 */
 handle_persistent_congestion :: proc(ecc: ^New_Reno_State) {
 	min_window := sync.atomic_load(&ecc.min_window)
-	sync.atomic_store(&sec.threshold, min_window)
-	sync.atomic_store(&sec.window, min_window)
+	sync.atomic_store(&ecc.threshold, min_window)
+	sync.atomic_store(&ecc.window, min_window)
 }
 
 // TODO: See if this approach to sending is fast enough
@@ -278,22 +278,24 @@ new_reno_pacer :: proc(
 ) {
 	rtt_smoothed: time.Duration
 	{
-		sync.guard(rtt.lock)
+		sync.guard(&rtt.lock)
 		rtt_smoothed = rtt.smoothed
 	}
-	last_send := sync.atomic_load(&ecc.last_send)
+	last_send := time.Tick {
+		_nsec = sync.atomic_load(&ecc.last_send),
+	}
 	window := sync.atomic_load(&ecc.window)
 	bytes_in_flight := sync.atomic_load(&ecc.bytes_in_flight)
-	num_bytes :=
-		time.tick_diff(last_send, time.tick_now()) *
+	num_bytes: u64 =
+		u64(time.tick_diff(last_send, time.tick_now())) *
 		K_NEW_RENO_PACER_NUM *
 		window /
-		(rtt_smoothed * K_NEW_RENO_PACER_DENOM)
-	num_bytes := min(num_bytes, max_db_size)
-	num_bytes := min(num_bytes, window - bytes_in_flight)
+		u64(rtt_smoothed * K_NEW_RENO_PACER_DENOM)
+	num_bytes = min(num_bytes, max_dg_size)
+	num_bytes = min(num_bytes, window - bytes_in_flight)
 	ok := num_bytes > 0
 
-	defer if ok do sync.atomic_store(&ecc.last_send, time.tick_now())
+	defer if ok do sync.atomic_store(&ecc.last_send, time.tick_now()._nsec)
 
 	return num_bytes, ok
 }

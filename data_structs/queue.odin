@@ -51,14 +51,13 @@ make_queue :: proc($T: typeid, $buf_len: int) -> Queue(^T, buf_len) {
   Add to the Queue
 */
 push :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
-	if sync.atomic_load(&q.len) < buf_len {
-		sync.atomic_add(&queue.len, 1)
+	if ok = sync.atomic_add(&q.len, 1) <= buf_len; ok {
 		idx := _inc_rem(&queue.write, 1, buf_len)
 		q.buf[idx] = val
-		return true
 	} else {
-		return false
+		sync.atomic_sub(&q.len, 1)
 	}
+	return
 }
 
 /*
@@ -67,10 +66,13 @@ push :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
   Remove from the Queue
 */
 pop :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
-	if sync.atomic_load(&q.len) > 0 {
-		sync.atomic_sub(&queue.len, 1)
+	if ok = sync.atomic_sub(&q.len, 1) >= 0; ok {
 		idx := _dec_rem(&queue.write, 1, buf_len)
+		ptr = queue.buf[idx]
+	} else {
+		sync.atomic_add(&q.len, 1)
 	}
+	return
 }
 
 /*
@@ -78,13 +80,18 @@ pop :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
   
   Atomic increment remainder (%%) the modulus.
 
-  Returns the value PRIOR to the operation
+  Returns the value PRIOR to the operation %% the length of the queue
+  Does a CAS whenever the updated value would go out of bounds of the queue.
+  The returned values are always in bounds, and the underlying values are eventually 
+  in bounds.
 */
 _inc_rem :: proc(addr: ^$T, rem: int) -> T {
 	old := sync.atomic_add(addr, 1)
+
 	if new := old + 1; new >= rem {
 		sync.compare_exchange_strong(addr, new, new %% rem)
 	}
+
 	return old %% rem
 }
 
@@ -93,12 +100,17 @@ _inc_rem :: proc(addr: ^$T, rem: int) -> T {
   
   Atomic decrement remainder (%%) the modulus.
 
-  Returns the value PRIOR to the operation
+  Returns the value PRIOR to the operation %% the length of the queue
+  Does a CAS whenever the updated value would go out of bounds of the queue
+  The returned values are always in bounds, and the underlying values are eventually
+  in bounds.
 */
 _dec_rem :: proc(addr: ^$T, rem: int) -> T {
 	old := sync.atomic_sub(addr, 1)
+
 	if new := old - 1; new <= 0 {
 		sync.compare_exchange_strong(addr, new, new %% rem)
 	}
+
 	return old %% rem
 }
