@@ -28,6 +28,8 @@ import "core:sync"
 
   Do not initialize the values of the struct. The procedures below 
   expect them to be intiialized to zero.
+
+  Or just use the the Make_Queue procedure.
 */
 Queue :: struct($T: typeid, $buf_len: int) {
 	buf:   [buf_len]^T,
@@ -42,7 +44,7 @@ Queue :: struct($T: typeid, $buf_len: int) {
   Initialize the queue.
 */
 make_queue :: proc($T: typeid, $buf_len: int) -> Queue(^T, buf_len) {
-	return Queue(^T, buf_len){read = 0, write = 1}
+	return Queue(^T, buf_len){}
 }
 
 /*
@@ -51,13 +53,12 @@ make_queue :: proc($T: typeid, $buf_len: int) -> Queue(^T, buf_len) {
   Add to the Queue
 */
 write :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
-	if ok = sync.atomic_add(&q.len, 1) <= buf_len; ok {
-		idx := _inc_rem(&queue.write, buf_len)
-		sync.atomic_store(&q.buf[idx], val)
-	} else {
-		sync.atomic_sub(&q.len, 1)
-	}
-	return
+	defer if !ok do sync.atomic_sub(&q.len, 1)
+	sync.atomic_add(&q.len, 1) <= buf_len or_return
+	
+	idx := _inc_rem(&queue.write, buf_len)
+	sync.atomic_store(&q.buf[idx], val)
+	return true
 }
 
 /*
@@ -66,18 +67,17 @@ write :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
   Remove from the Queue
 */
 read :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
-	if ok = sync.atomic_sub(&q.len, 1) >= 0; ok {
-		idx := _inc_rem(&queue.read, buf_len)
-		ptr = sync.atomic_exchange(&queue.buf[idx], nil)
-		if ok = ptr != nil; !ok {
-			sync.atomic_add(&q.len, 1)
-			_dec_rem(&queue.read, buf_len)
-		}
-	} else {
-		sync.atomic_add(&q.len, 1)
-	}
-	return
+	defer if !ok do sync.atomic_add(&q.len, 1)
+	sync.atomic_sub(&q.len, 1) >= 0 or_return
+
+	defer if !ok do _dec_rem(&queue.read, buf_len)
+	idx := _inc_rem(&queue.read, buf_len)
+
+	ptr = sync.atomic_exchange(&queue.buf[idx], nil)
+	return ptr, ptr != nil
 }
+
+
 
 /*
   _inc_rem
