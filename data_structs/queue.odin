@@ -23,8 +23,8 @@ import "core:sync"
 
   Or more_easily: `make_queue(some_type, some_len)`
 
-  Use `push` to add to the Queue. 
-  Use `pop` to consume the Queue. 
+  Use `write` to add to the Queue. 
+  Use `read` to consume the Queue. 
 
   Do not initialize the values of the struct. The procedures below 
   expect them to be intiialized to zero.
@@ -46,14 +46,14 @@ make_queue :: proc($T: typeid, $buf_len: int) -> Queue(^T, buf_len) {
 }
 
 /*
-  push
+  write
 
   Add to the Queue
 */
-push :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
+write :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
 	if ok = sync.atomic_add(&q.len, 1) <= buf_len; ok {
-		idx := _inc_rem(&queue.write, 1, buf_len)
-		q.buf[idx] = val
+		idx := _inc_rem(&queue.write, buf_len)
+		sync.atomic_store(&q.buf[idx], val)
 	} else {
 		sync.atomic_sub(&q.len, 1)
 	}
@@ -61,14 +61,18 @@ push :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
 }
 
 /*
-  pop
+  read
 
   Remove from the Queue
 */
-pop :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
+read :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
 	if ok = sync.atomic_sub(&q.len, 1) >= 0; ok {
-		idx := _dec_rem(&queue.write, 1, buf_len)
-		ptr = queue.buf[idx]
+		idx := _inc_rem(&queue.read, buf_len)
+		ptr = sync.atomic_exchange(&queue.buf[idx], nil)
+		if ok = ptr != nil; !ok {
+			sync.atomic_add(&q.len, 1)
+			_dec_rem(&queue.read, buf_len)
+		}
 	} else {
 		sync.atomic_add(&q.len, 1)
 	}
