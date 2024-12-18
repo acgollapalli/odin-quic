@@ -71,11 +71,10 @@ init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 /* Receiving Datagrams */
 
 Recvmsg_Ctx :: struct {
-	io:      nbio.IO,
-	name:    Sock_Addr_Any, // should
-	_buf:    [MAX_DGRAM_SIZE]byte,
-	io_vecs: [][]u8,
+	name:    [110]u8, // should
+	buf:    [MAX_DGRAM_SIZE]byte,
 	sock:    net.UDP_Socket,
+	io:      nbio.IO,
 }
 
 
@@ -90,8 +89,6 @@ Recvmsg_Ctx :: struct {
 // socket binding issues.
 receive_thread_task :: proc(endpoint: ^net.Endpoint) {
 	ctx: Recvmsg_Ctx
-
-	ctx.io_vecs = [][]u8{ctx._buf[:]}
 
 	nbio.init(&ctx.io)
 	defer nbio.destroy(&ctx.io)
@@ -108,15 +105,13 @@ receive_thread_task :: proc(endpoint: ^net.Endpoint) {
 	fmt.assertf(err == nil, "Error opening socket: %v", err)
 	io_err: os.Errno
 
-	s := transmute([^]u8)rawptr(&ctx.name)
-
-	nbio.recvmsg(&ctx.io, ctx.sock, s[0:110], ctx.io_vecs, &ctx, on_recvmsg)
+	nbio.recvmsg(&ctx.io, ctx.sock, ctx.name[:], [][]u8{ctx.buf[:]}, rawptr(&ctx), on_recvmsg)
 
 	for go := Global_Context.thread_state;
 	    go != .Stop && io_err == os.ERROR_NONE; {
 		if go == .Pause do continue
 
-		nbio.tick(&ctx.io)
+		io_err = nbio.tick(&ctx.io)
 	}
 }
 
@@ -128,14 +123,17 @@ in, instead of expecting NBIO to do it. That way we can just reuse the IO_Vecs p
 thread, or put it in a pool to be reused or something.
 */
 on_recvmsg :: proc(
-	ctx: rawptr,
+	ctx_ptr: rawptr,
 	name_len: int,
 	received: int,
 	err: net.Network_Error,
 ) {
-	ctx := transmute(^Recvmsg_Ctx)ctx
+	ctx := (^Recvmsg_Ctx)(ctx_ptr)
 	//peer := _wrap_os_addr(sockaddr)
+	peer_sock := transmute(Sock_Addr_Any)ctx.name
 	parse_ok := false
+
+	fmt.println("buf_len: ", len(ctx.buf))
 
 	if err == nil && parse_ok {
 		// FIXME: handle_datagram expects a regular slice instead of
@@ -143,14 +141,11 @@ on_recvmsg :: proc(
 		//handle_datagram(ctx.io_vecs[0][:received], peer)
 	} else {
 		if err != nil do fmt.printfln("Error receiving from client: %v", err)
-		if !parse_ok do fmt.printfln("Error reading peer path: %v, %v", ctx.name.family, ctx.name.port)
-		fmt.printfln("received message: %v", string(ctx.io_vecs[0][:received]))
+		if !parse_ok do fmt.printfln("Error reading peer path: %v, %v", peer_sock.family, peer_sock.port)
+		fmt.printfln("received message: %v", ctx.buf[:max(received, 1)])
 	}
 
-
-	s := transmute([^]u8)rawptr(&ctx.name) // FIXME: change this to proper types in your nbio mods
-
-	nbio.recvmsg(&ctx.io, ctx.sock, s[0:110], ctx.io_vecs, &ctx, on_recvmsg)
+	nbio.recvmsg(&ctx.io, ctx.sock,ctx.name[:], [][]u8{ctx.buf[:]}, ctx_ptr, on_recvmsg)
 }
 
 /* Sending Datagrams */
