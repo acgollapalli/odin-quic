@@ -298,12 +298,13 @@ apply_header_protection :: proc(
 	}
 
 	hp_key := get_hp_key(conn, encryption_level, .Write)
-	mask := get_header_mask(
+	mask,m_ok := get_header_mask(
 		packet[pkt_number_index + 4:pkt_number_index + 20],
 		conn,
 		encryption_level,
 		Secret_Role.Write,
 	)
+	assert(m_ok, "could not get header mask when serializing")
 
 	packet_number_bytes := packet[pkt_number_index:pkt_number_index +
 	packet_number_length]

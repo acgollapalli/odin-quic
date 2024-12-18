@@ -37,11 +37,12 @@ SDG                                                                           JJ
 package quic
 
 import "core:net"
+import ds "./data_structs"
 
 /*
   quic.Connect_Callback
 
-  Callback parameter for the callbacks struct in the `init` procedure.
+  Callback parameter type for the callbacks struct in the `init` procedure.
 
   This callback is called whenever a client connects to QUIC. The endpoint
   is included in-case the application must block certain IP's or regions, for
@@ -50,10 +51,12 @@ import "core:net"
   If this parameter is left null, incoming packets from unknown peers are
   ignored.
 */
-Connect_Callback :: #type proc(peer: net.Endpoint, conn_id: Connection_Id)
+Connect_Callback :: #type proc(peer: net.Endpoint, conn: ^Conn)
 
 /*
   quic.Stream_Callback
+
+  Callback parameter type for the callbacks struct in the `init` procedure.
 
   This callback is called whenever a stream is initiated by the peer, when new
   data is available on the stream, or when it is closed.
@@ -61,13 +64,15 @@ Connect_Callback :: #type proc(peer: net.Endpoint, conn_id: Connection_Id)
   This parameter is required.
 */
 Stream_Callback :: #type proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	stream_id: Stream_Id,
 	err: Transport_Error,
 )
 
 /*
   quic.Datagram_Frame_Callback
+
+  Callback parameter type for the callbacks struct in the `init` procedure.
 
   This callback is called whenever a Datagram_Frame is called. Please ensure
   That this is non-blocking. 
@@ -78,9 +83,10 @@ Stream_Callback :: #type proc(
   If you do not specify this, the datagram extension will be disabled.
 */
 Datagram_Frame_Callback :: #type proc(
-	conn_id: Connection_Id,
-	callback: proc(ctx: rawptr),
-	callback_ctx: rawptr,
+	conn: ^Conn,
+//	callback: proc(ctx: rawptr),
+	//	callback_ctx: rawptr,
+	data: []u8
 )
 
 /*
@@ -109,18 +115,19 @@ Callbacks :: struct {
   attempts from unknown sources will be ignored.
 */
 init :: proc(role: Role, callbacks: Callbacks) {
-	#assert(false, "Not Implemented Yet")
+	// TODO figure out client defaults
+	init_runtime(callbacks)
 }
 
 /*
   On_Connection
 
-  Accepts a tuple of a Connection_Id and a Transport_Error.
+  Accepts a tuple of a ^Conn and a Transport_Error.
   This is called on either a successful path validation or
   otherwise when it is possible to start sending application
   data.
 */
-On_Connection :: #type proc(conn_id: Connection_Id, err: Transport_Error)
+On_Connection :: #type proc(conn: ^Conn, err: Transport_Error)
 
 /*
   quic.create_connection
@@ -131,7 +138,7 @@ On_Connection :: #type proc(conn_id: Connection_Id, err: Transport_Error)
   and there are no separate early data apis.
  */
 create_connection :: proc(peer: net.Endpoint, callback: On_Connection) {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
 }
 
 /*
@@ -150,8 +157,8 @@ create_connection :: proc(peer: net.Endpoint, callback: On_Connection) {
   let the server know to load cached user data before the application client 
   starts sending stateful updates.
 */
-open_connection :: proc(conn_id: Connection_Id) {
-	#assert(false, "Not Implemented Yet")
+open_connection :: proc(conn: ^Conn) {
+	assert(false, "Not Implemented Yet")
 }
 
 /*
@@ -165,13 +172,13 @@ open_connection :: proc(conn_id: Connection_Id) {
   In order to write to this stream, use `write_stream`
 */
 create_stream :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	bidirectional: bool,
 ) -> (
 	stream_id: Stream_Id,
-	err: Transport_Error,
+	ok: bool,
 ) {
-	#assert(false, "Not Implemented Yet")
+	return init_stream(conn, bidirectional)
 }
 
 /*
@@ -186,14 +193,15 @@ create_stream :: proc(
   meaning it is safe to use multithreaded.
 */
 get_stream_writable :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	stream_id: Stream_Id,
 	len: uint,
 ) -> (
 	[]byte,
 	Application_Write_Error,
 ) {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
+	return nil, nil
 }
 
 /*
@@ -206,11 +214,12 @@ get_stream_writable :: proc(
   TODO: fix this. It is an ugly API, even if conducive to IO_Vecs
 */
 write_stream_writable :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	stream_id: Stream_Id,
 	buf: []byte,
 ) -> Application_Write_Error {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
+	return nil
 }
 
 /*
@@ -222,14 +231,15 @@ write_stream_writable :: proc(
   data.
 */
 get_stream_readable :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	stream_id: Stream_Id,
 	max_len: uint,
 ) -> (
 	[]byte,
 	Application_Read_Error,
 ) {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
+	return nil, nil
 }
 
 /*
@@ -240,11 +250,12 @@ get_stream_readable :: proc(
   provided by `get_stream_readable`
 */
 read_stream_readable :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	stream_id: Stream_Id,
 	buf: []byte,
 ) -> Application_Read_Error {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
+	return nil
 }
 
 /*
@@ -257,8 +268,8 @@ read_stream_readable :: proc(
   You have 2^60 -1 streams, of the sending, receiving, and bidirectional sort,
   so use them freely.
 */
-stream_finish :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
-	#assert(false, "Not Implemented Yet")
+stream_finish :: proc(conn: ^Conn, stream_id: Stream_Id) {
+	assert(false, "Not Implemented Yet")
 }
 
 /*
@@ -270,8 +281,8 @@ stream_finish :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
 
   If the stream is bidirectional, it closes both ends.
 */
-close_stream :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
-	#assert(false, "Not Implemented Yet")
+close_stream :: proc(conn: ^Conn, stream_id: Stream_Id) {
+	assert(false, "Not Implemented Yet")
 }
 
 /* 
@@ -281,9 +292,9 @@ close_stream :: proc(conn_id: Connection_Id, stream_id: Stream_Id) {
   The error_code param is application specific, as is the reason phrase
 */
 close_connection :: proc(
-	conn_id: Connection_Id,
+	conn: ^Conn,
 	error_code: u32,
 	reason_phrase: string,
 ) {
-	#assert(false, "Not Implemented Yet")
+	assert(false, "Not Implemented Yet")
 }

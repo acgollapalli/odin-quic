@@ -8,11 +8,10 @@ SDG                                                                           JJ
   it is designed to be scaled according to the users needs, and to scale up
   and down in accordance with the load at any point.
 
-
  */
+
 package quic
 
-// std library declarations
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
@@ -21,31 +20,16 @@ import "core:os"
 import "core:sync"
 import "core:thread"
 
-// in engine declarations
 import "net:http/nbio"
 import "net:http/nbio/poly"
 
 import data_structs "net:quic/data_structs"
 
-/*
-  TODO: Document
-*/
 MIN_READ_THREADS, MAX_READ_THREADS ::
 	#config(MIN_READ_THREADS, 1), #config(MAX_READ_THREADS, 64)
 
-/*
-  TODO: Document
-*/
 MIN_WRITE_THREADS, MAX_WRITE_THREADS ::
 	#config(MIN_WRITE_THREADS, 1), #config(MAX_WRITE_THREADSS, 64)
-
-/*
-  TODO: Document
-  These should be cheap.
-  TODO: make acks run in batches and queues so those are cheap.
-*/
-MIN_TIMER_THREADS, MAX_TIMER_THREADS ::
-	#config(MIN_TIMER_THREADS, 1), #config(MAX_TIMER_THREADS, 4)
 
 PORT :: #config(PORT, 8443)
 ADDRESS :: #config(ADDRESS, "127.0.0.1")
@@ -66,14 +50,19 @@ init_with_client_defaults :: proc(alloc := context.allocator) {
 	context.allocator = alloc
 }
 
-init_runtime :: proc(address := ADDRESS, port := PORT) {
+init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 	address := net.parse_address(ADDRESS)
 	fmt.assertf(address != nil, "Error parsing connection params: %v", ADDRESS)
 
 	endpoint := net.Endpoint{address, PORT}
 
-	init_quic_context()
+	init_quic_context(callbacks)
 
+	receive_thread := thread.create_and_start_with_poly_data(&endpoint, receive_thread_task)
+	send_thread := thread.create_and_start_with_poly_data(&endpoint, send_thread_task)
+	for !thread.is_done(receive_thread) && !thread.is_done(send_thread) {
+
+	}
 }
 
 /* Thread Contexts */
@@ -83,8 +72,9 @@ init_runtime :: proc(address := ADDRESS, port := PORT) {
 
 Recvmsg_Ctx :: struct {
 	io:      nbio.IO,
-	name:    [80]byte, // should
-	io_vecs: [1][MAX_DGRAM_SIZE]byte,
+	name:    Sock_Addr_Any, // should
+	_buf:    [MAX_DGRAM_SIZE]byte,
+	io_vecs: [][]u8,
 	sock:    net.UDP_Socket,
 }
 
@@ -98,8 +88,10 @@ Recvmsg_Ctx :: struct {
 // frenkly it's a tomorrow problme.
 // TODO: figure out how to handle multithreading given
 // socket binding issues.
-receive_thread_task :: proc(endpoint: net.Endpoint) {
+receive_thread_task :: proc(endpoint: ^net.Endpoint) {
 	ctx: Recvmsg_Ctx
+
+	ctx.io_vecs = [][]u8{ctx._buf[:]}
 
 	nbio.init(&ctx.io)
 	defer nbio.destroy(&ctx.io)
@@ -108,7 +100,7 @@ receive_thread_task :: proc(endpoint: net.Endpoint) {
 	sock, err := nbio.open_socket(&ctx.io, address_family, .UDP)
 	ctx.sock = sock.(net.UDP_Socket)
 
-	if err = net.bind(ctx.sock, endpoint); err != nil {
+	if err = net.bind(ctx.sock, endpoint^); err != nil {
 		net.close(ctx.sock)
 		return
 	}
@@ -116,7 +108,9 @@ receive_thread_task :: proc(endpoint: net.Endpoint) {
 	fmt.assertf(err == nil, "Error opening socket: %v", err)
 	io_err: os.Errno
 
-	nbio.recvmsg(&ctx.io, ctx.name[:], ctx.io_vecs[:], &ctx, on_recvmsg)
+	s := transmute([^]u8)rawptr(&ctx.name)
+
+	nbio.recvmsg(&ctx.io, ctx.sock, s[0:110], ctx.io_vecs, &ctx, on_recvmsg)
 
 	for go := Global_Context.thread_state;
 	    go != .Stop && io_err == os.ERROR_NONE; {
@@ -140,19 +134,23 @@ on_recvmsg :: proc(
 	err: net.Network_Error,
 ) {
 	ctx := transmute(^Recvmsg_Ctx)ctx
-	name := string(ctx.name[:name_len])
-	peer, parse_ok := net.parse_endpoint(name)
+	//peer := _wrap_os_addr(sockaddr)
+	parse_ok := false
 
 	if err == nil && parse_ok {
 		// FIXME: handle_datagram expects a regular slice instead of
 		// io_vecs so we only have a single buffer right now
-		handle_datagram(ctx.io_vecs[0][:received], peer)
+		//handle_datagram(ctx.io_vecs[0][:received], peer)
 	} else {
 		if err != nil do fmt.printfln("Error receiving from client: %v", err)
-		if !parse_ok do fmt.printfln("Error reading peer path: %v", name)
+		if !parse_ok do fmt.printfln("Error reading peer path: %v, %v", ctx.name.family, ctx.name.port)
+		fmt.printfln("received message: %v", string(ctx.io_vecs[0][:received]))
 	}
 
-	nbio.recvmsg(&ctx.io, ctx.name[:], ctx.io_vecs[:], &ctx, on_recvmsg)
+
+	s := transmute([^]u8)rawptr(&ctx.name) // FIXME: change this to proper types in your nbio mods
+
+	nbio.recvmsg(&ctx.io, ctx.sock, s[0:110], ctx.io_vecs, &ctx, on_recvmsg)
 }
 
 /* Sending Datagrams */
@@ -161,12 +159,15 @@ Sendmsg_Ctx :: struct {
 	io_vecs: [1][MAX_DGRAM_SIZE]byte,
 	sock:    net.UDP_Socket,
 }
-send_thread_task :: proc(sock: net.UDP_Socket) {
+send_thread_task :: proc(endpoint: ^net.Endpoint) {
 	ctx: Sendmsg_Ctx
-	ctx.sock = sock
 
 	nbio.init(&ctx.io)
 	defer nbio.destroy(&ctx.io)
+
+	address_family := net.family_from_address(endpoint.address)
+	sock, err := nbio.open_socket(&ctx.io, address_family, .UDP)
+	ctx.sock = sock.(net.UDP_Socket)
 
 	io_err: os.Errno
 
@@ -181,14 +182,15 @@ send_thread_task :: proc(sock: net.UDP_Socket) {
 		for &c in Global_Context.connections {
 			dglen: int
 			for pn_space, p in c.send { 	// TODO: is there syntax to force unroll?
-				pkt, plen := make_packet(c, p, ctx.io_vecs[0][dglen:])
+				pkt := ctx.io_vecs[0][dglen:]
+				plen := make_packet(c, p, pkt)
 			}
 			if dglen > 0 {
 				nbio.sendmsg(
 					&ctx.io,
 					ctx.sock,
 					transmute([]u8)net.endpoint_to_string(c.endpoint),
-					ctx.io_vecs[:],
+					[][]u8{ctx.io_vecs[0][:dglen]},
 					&ctx,
 					on_sendmsg,
 				)
@@ -205,5 +207,5 @@ on_sendmsg :: proc(user: rawptr, sent: int, err: net.Network_Error) {
 	// send failures will be treated as lost packets and retransmitted.
 	// that may be slow, and it may be better to handle it here.
 	// I guess we'll just have to use this to handle errors
-	#assert(false, "Handle your errors properly")
+	assert(false, "Handle your errors properly")
 }

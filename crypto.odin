@@ -173,9 +173,15 @@ get_header_mask_w_conn :: proc(
 	conn: ^Conn,
 	encryption_level: ssl.QUIC_Encryption_Level,
 	role: Secret_Role,
-) -> []byte {
+) -> (val: []byte, ok: bool) {
+	has_valid_secret(conn, encryption_level, role) or_return
 	hp_key, algo := get_hp_key_and_algo(conn, encryption_level, role)
-	return get_header_mask_proper(hp_key, sample, algo)
+	return get_header_mask_proper(hp_key, sample, algo), true
+}
+
+has_valid_secret :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level, role: Secret_Role) -> (ok: bool) {
+	sync.shared_guard(&conn.encryption.lock)
+	return conn.encryption.secrets[level][role].valid
 }
 
 /* 
@@ -333,7 +339,7 @@ determine_initial_secret :: proc(
 	return secret
 }
 
-destroy_secret :: proc(secret: TLS_Secret) {
+destroy_secret :: proc(secret: ^TLS_Secret) {
 	d_if := proc(s: []byte) {
 		if s != nil {
 			delete(s)
@@ -344,12 +350,20 @@ destroy_secret :: proc(secret: TLS_Secret) {
 	d_if(secret.hp)
 	d_if(secret.iv)
 	d_if(secret.ku)
+	secret.valid = false
 }
 
 destroy_encryption :: proc(conn: ^Conn) {
 	// delete all keys
 	// delete ssl connection
-	#assert(false, "not implemented")
+	sync.guard(&conn.encryption.lock)
+	for &p in conn.encryption.secrets {
+		for &s in p {
+			destroy_secret(&s)
+		}
+	}
+	ssl.free_conn(conn.encryption.ssl)
+	conn.encryption.ssl = nil
 }
 
 /*
@@ -468,7 +482,7 @@ add_handshake_data :: proc "c" (
 	dlen: uint,
 ) -> i32 {
 	context = runtime.default_context()
-	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	conn, _ := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
 	l := transmute(ssl.QUIC_Encryption_Level)level
 
 	q := conn.send[PN_Spaces[l]]
@@ -481,7 +495,8 @@ add_handshake_data :: proc "c" (
 
 flush_flight :: proc "c" (ssl_conn: ssl.SSL_Connection) -> i32 {
 	context = runtime.default_context()
-	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	conn, conn_ok := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	assert(conn_ok, "was not able to find conn in flush flight")
 	pns := conn.send
 	for &q in pns {
 		sync.guard(&q.lock)
@@ -496,7 +511,8 @@ send_alert :: proc "c" (
 	alert: u8,
 ) -> i32 {
 	context = runtime.default_context()
-	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	conn, conn_ok := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	assert(conn_ok, "send alert failed to find conn")
 	context = runtime.default_context()
 	close_conn(conn, transmute(Transport_Error)int(alert))
 
@@ -511,7 +527,7 @@ set_read_secret :: proc "c" (
 	slen: uint,
 ) -> i32 {
 	context = runtime.default_context()
-	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	conn, _ := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
 	l := transmute(ssl.QUIC_Encryption_Level)level
 
 	e := conn.encryption.secrets[l][.Read]
@@ -528,6 +544,7 @@ set_read_secret :: proc "c" (
 	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
 	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
 	e.valid = true
+	return 1
 }
 
 set_write_secret :: proc "c" (
@@ -538,7 +555,7 @@ set_write_secret :: proc "c" (
 	slen: uint,
 ) -> i32 {
 	context = runtime.default_context()
-	conn := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
+	conn, _ := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
 	l := transmute(ssl.QUIC_Encryption_Level)level
 	e := conn.encryption.secrets[l][.Write]
 	if !e.valid {
@@ -554,6 +571,7 @@ set_write_secret :: proc "c" (
 	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
 	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
 	e.valid = true
+	return 1
 }
 
 Quic_Method :: ssl.SSL_QUIC_METHOD {

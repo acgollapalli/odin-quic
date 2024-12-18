@@ -18,7 +18,7 @@ Partial_Packet :: struct {
 }
 
 
-handle_datagram :: proc(dg: []byte, client: net.Endpoint) {
+handle_datagram :: proc(dg: []byte, peer: net.Endpoint) {
 	dest_conn_id: Connection_Id
 	conn: Maybe(^Conn) // we don't know the connn til we have the dest_conn_id
 
@@ -29,13 +29,15 @@ handle_datagram :: proc(dg: []byte, client: net.Endpoint) {
 
 		// establish our baselines
 		if dest_conn_id == nil do dest_conn_id = get_dest_conn_id(packet)
-		if conn == nil do conn = find_conn(dest_conn_id)
+		if conn == nil do conn, _ = find_conn(dest_conn_id)
 
 		if err != nil {
 			handle_transport_error(conn, err)
 			return
-		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) {
-			handle_incoming_packet(conn, packet, len_dg) // TODO: This should MAYBE put the packet on thread specific queue
+		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
+		   packet != nil {
+			// TODO: This should MAYBE put the packet on thread specific queue
+			handle_incoming_packet(conn, packet, len_dg, peer)
 		}
 	}
 }
@@ -188,15 +190,20 @@ process_initial :: proc(
 	// by a retry use the same keys. On a retry. The keys should be marked INVALID.
 	role: Role
 	hp_key: []byte
-	if conn := find_conn(dest_conn_id); conn != nil { 	// FIXME: REPLACE WITH ZII
+	if conn, c_ok := find_conn(dest_conn_id); c_ok {
 		sync.shared_guard(&conn.encryption.lock)
+		assert(
+			conn.encryption.secrets[.Initial_Encryption][.Read].valid,
+			"invalid secret",
+		)
 		hp_key := conn.encryption.secrets[.Initial_Encryption][.Read].hp
 	} else {
-		// FIXME: we should CONSIDER adding the conn here (BUT... it's based off the dest id, so do we NEED TO? maybe it should be handled by the frame handler, not down here)
+		// FIXME: we should CONSIDER adding the conn here (BUT...
+		// it's based off the dest id, so do we NEED TO? maybe
+		// it should be handled by the frame handler, not down here)
 		secrets := determine_initial_secret(dest_conn_id)
 		hp_key = secrets[.Read].hp
 	}
-
 
 	// FIXME: Should we be decrypting packet protection here?
 	token_length, tk_offset := get_variable_length_int(packet)
@@ -245,18 +252,24 @@ process_handshake :: proc(
 	packet := packet
 
 	// getting the mask
-	mask: []byte
-	conn := find_conn(dest_conn_id)
-	if conn != nil { 	// FIXME: REPLACE WITH ZII
-		mask = get_header_mask(
-			packet[4:20],
-			conn,
-			ssl.QUIC_Encryption_Level.Handshake_Encryption,
-			Secret_Role.Read,
+	conn, conn_ok := find_conn(dest_conn_id)
+	if !conn_ok { 	// FIXME: REPLACE WITH ZII
+		assert(
+			conn.encryption.secrets[.Handshake_Encryption][.Read].valid,
+			"Dropped handshake packet",
 		)
-	} else {
-		return nil, nil, .PROTOCOL_VIOLATION
+		return nil, nil, .PROTOCOL_VIOLATION // we SHOULD have keys by this point
 	}
+	mask, mask_ok := get_header_mask(
+		packet[4:20],
+		conn,
+		ssl.QUIC_Encryption_Level.Handshake_Encryption,
+		Secret_Role.Read,
+	)
+	if !mask_ok {
+		return
+	} // can't decrypt. We might not have keys yet. 
+
 
 	// FIXME: Remove packet protection HERE
 	// FIXME: Should we be decrypting packet protection here?
@@ -349,17 +362,22 @@ process_zero_rtt :: proc(
 	packet := packet
 
 	// getting the mask
-	mask: []byte
-	conn := find_conn(dest_conn_id)
-	if conn != nil { 	// FIXME: REPLACE WITH ZII
-		mask = get_header_mask(
-			packet[4:20],
-			conn,
-			ssl.QUIC_Encryption_Level.Early_Data_Encryption,
-			Secret_Role.Read,
+	conn, conn_ok := find_conn(dest_conn_id)
+	if !conn_ok {
+		assert(
+			conn.encryption.secrets[.Handshake_Encryption][.Read].valid,
+			"Could not find conn. for Zero-RTT packet",
 		)
-	} else {
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
+	}
+	mask, mask_ok := get_header_mask(
+		packet[4:20],
+		conn,
+		ssl.QUIC_Encryption_Level.Early_Data_Encryption,
+		Secret_Role.Read,
+	)
+	if !mask_ok {
+		return
 	}
 
 	payload_length, offset := get_variable_length_int(packet)
@@ -398,17 +416,18 @@ process_one_rtt :: proc(
 
 	// getting the mask
 	mask: []byte
-	conn := find_conn(dest_conn_id)
-	if conn != nil { 	// FIXME: REPLACE WITH ZII
-		mask = get_header_mask(
+	mask_ok: bool
+	conn, conn_ok := find_conn(dest_conn_id)
+	if !conn_ok { 	// FIXME: REPLACE WITH ZII
+		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object
+	}
+	mask, mask_ok = get_header_mask(
 			packet[4:20],
 			conn,
 			ssl.QUIC_Encryption_Level.Application_Encryption,
 			Secret_Role.Read,
-		)
-	} else {
-		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
-	}
+	)
+	if !mask_ok do return
 
 	// removing packet protection
 	decrypted_first_byte: byte

@@ -205,7 +205,7 @@ new_reno_handle_congestion :: proc(
   otherwise it enters the recovery period.
 */
 new_reno_on_packet_loss :: proc(ecc: ^New_Reno_State, ack_state: ^Ack_State) {
-	#assert(false, "not implemented")
+	assert(false, "not implemented")
 }
 
 /*

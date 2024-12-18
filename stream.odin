@@ -4,6 +4,8 @@
 
 package quic
 
+import "core:sync"
+
 Stream_Id :: distinct u64
 
 Stream :: union {
@@ -126,8 +128,12 @@ stream_id_bits :: proc(
 // will initialize streams as requested by remote, provided that they are within configured limits
 // will NOT initialize streams for locally initiated streams, but will instead return nil and a
 // Transport Error.
-get_stream :: proc(conn: ^Conn, stream_id: u64) -> (Stream, Transport_Error) {
+get_stream :: proc(conn: ^Conn, stream_id: u64) -> (^Stream, Transport_Error) {
 	if stream_id > (u64(2) << 62 - 1) do return nil, .STREAM_STATE_ERROR
+
+	// TODO: make sure this is a-ok, since we're outside of this function
+	// FIXME: Actually, add guards to the callers of this function
+	sync.guard(&conn.lock)
 
 	last_bit := stream_id & 0x01
 	initiator: Role
@@ -142,38 +148,79 @@ get_stream :: proc(conn: ^Conn, stream_id: u64) -> (Stream, Transport_Error) {
 	stream_index := stream_id >> 2
 
 	if initiator == conn.role {
-		s: [dynamic]Stream
+		s: ^[dynamic]Stream
 
 		switch stream_type {
 		case .Bidirectional:
-			s = conn.locally_initiated_streams_bi
+			s = &conn.locally_initiated_streams_bi
 		case .Unidirectional:
-			s = conn.locally_initiated_streams_uni
+			s = &conn.locally_initiated_streams_uni
 		}
 
 		if u64(len(s)) <= stream_index do return nil, .STREAM_STATE_ERROR
-		else do return s[stream_index], nil
+		else do return &s[stream_index], nil
 	} else {
-		s: [dynamic]Stream
+		s: ^[dynamic]Stream
 		max: u64
 		switch stream_type {
 		case .Bidirectional:
-			s = conn.remote_initiated_streams_bi
+			s = &conn.remote_initiated_streams_bi
 			max = conn.max_remote_streams_limit_bi
 		case .Unidirectional:
-			s = conn.remote_initiated_streams_uni
+			s = &conn.remote_initiated_streams_uni
 			max = conn.max_remote_streams_limit_uni
 		}
 
 		if stream_index > max do return nil, .STREAM_STATE_ERROR
 
 		if u64(len(s)) <= stream_index {
-			if err := reserve(&s, int(stream_id >> 2 - 1)); err == nil {
-				return s[stream_id >> 2], nil
+			if err := reserve(s, int(stream_id >> 2 - 1)); err == nil {
+				return &s[stream_index], nil
 			} else {
 				return nil, .STREAM_LIMIT_ERROR
 			}
-		} else do return s[stream_id], nil
+		} else do return &s[stream_index], nil
 	}
+
+}
+
+init_stream :: proc(
+	conn: ^Conn,
+	bidirectional: bool,
+) -> (
+	stream_id: Stream_Id,
+	ok: bool,
+) {
+	s: ^[dynamic]Stream
+	ms: ^u64
+
+	if bidirectional {
+		s = &conn.locally_initiated_streams_bi
+		ms = &conn.max_local_streams_limit_bi
+	} else {
+		s = &conn.locally_initiated_streams_uni
+		ms = &conn.max_local_streams_limit_uni
+	}
+
+	can_add: bool
+	{
+		sync.shared_guard(&conn.lock)
+		// FIXME: we can't just have an array of max(u64) streams
+		// that WILL break
+		can_add = len(s) < int(ms^)
+	}
+
+	can_add or_return
+
+	b: Stream = bidirectional ? Bidirectional_Stream{} : Sending_Stream{}
+	{
+		sync.guard(&conn.lock)
+		append(s, b)
+		stream_id = Stream_Id(len(s))
+	}
+	stream_id <<= 2
+	stream_id &= 1
+	if !bidirectional do stream_id &= 2
+	return
 
 }

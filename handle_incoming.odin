@@ -7,6 +7,7 @@ SDG                                                                           JJ
 package quic
 
 import ssl "../ssl"
+import "core:net"
 
 // not implemented yet
 VALIDATE_PATHS :: false // #config(VALIDATE_PATHS, true)
@@ -15,9 +16,10 @@ handle_incoming_packet :: proc(
 	conn: Maybe(^Conn),
 	packet: Packet,
 	len_dg: int,
+	peer: net.Endpoint,
 ) {
 	if conn == nil {
-		handle_new_state(conn, packet, len_dg)
+		handle_new_state(conn, packet, len_dg, peer)
 
 	} else if conn, ok := conn.?; ok {
 		ack_eliciting: bool
@@ -25,7 +27,7 @@ handle_incoming_packet :: proc(
 		switch conn.state {
 		case .New:
 			// we only ever get here from the client side
-			handle_new_state(conn, packet, len_dg)
+			handle_new_state(conn, packet, len_dg, peer)
 			return
 		case .Address_Validation:
 			conn.state = .Address_Valid
@@ -33,42 +35,42 @@ handle_incoming_packet :: proc(
 		case .Address_Valid:
 			switch p in packet {
 			case Initial_Packet:
-				ack_eliciting, err = handle_initial(conn, p)
+				ack_eliciting, err = handle_initial(conn, p, peer)
 			case Handshake_Packet:
-				ack_eliciting, err = handle_handshake(conn, p)
+				ack_eliciting, err = handle_handshake(conn, p, peer)
 			case Version_Negotiation_Packet:
 				return // TODO: handle version negotiation
 			case Retry_Packet:
 				if conn.role == .Client && !conn.retry_received {
-					handle_retry(conn, p)
+					handle_retry(conn, p, peer)
 				}
 				return
 			case One_RTT_Packet:
 				return
 			case Zero_RTT_Packet:
-				ack_eliciting, err = handle_zero_rtt(conn, p)
+				ack_eliciting, err = handle_zero_rtt(conn, p, peer)
 			}
 		case .Handshake:
 			switch p in packet {
 			case Initial_Packet:
 				return
 			case Handshake_Packet:
-				ack_eliciting, err = handle_handshake(conn, p)
+				ack_eliciting, err = handle_handshake(conn, p, peer)
 			case Version_Negotiation_Packet:
 				return
 			case Retry_Packet:
 				if conn.role == .Client && !conn.retry_received {
-					err = handle_retry(conn, p)
+					err = handle_retry(conn, p, peer)
 				}
 			case One_RTT_Packet:
 				return
 			case Zero_RTT_Packet:
-				ack_eliciting, err = handle_zero_rtt(conn, p)
+				ack_eliciting, err = handle_zero_rtt(conn, p, peer)
 			}
 		case .Secured:
 			#partial switch p in packet {
 			case One_RTT_Packet:
-				ack_eliciting, err = handle_one_rtt(conn, p)
+				ack_eliciting, err = handle_one_rtt(conn, p, peer)
 			case:
 				return
 			}
@@ -77,34 +79,46 @@ handle_incoming_packet :: proc(
 		case .Draining:
 			return
 		}
-		queue_ack(conn, packet, ack_eliciting)
+
+		if err != nil {
+			queue_ack(conn, packet, ack_eliciting)
+		} else {
+			handle_transport_error(conn, err)
+		}
 	}
 }
 
-handle_new_state :: proc(conn: Maybe(^Conn), packet: Packet, len_dg: int) {
+handle_new_state :: proc(
+	conn: Maybe(^Conn),
+	packet: Packet,
+	len_dg: int,
+	peer: net.Endpoint,
+) -> (
+	ack_eliciting: bool,
+	err: Transport_Error,
+) {
 	#partial switch p in packet {
 	case Initial_Packet:
-		if len_dg >= 1200 {
-			c: ^Conn
-			if conn, ok := conn.?; ok {
-				c = conn
-			} else {
-				c = create_conn(p)
-			}
-			ack_eliciting, err := handle_initial(c, p)
-			if err != nil {
-				close_conn(c, err)
-			} else {
-				queue_ack(c, p, ack_eliciting)
-			}
+		c: ^Conn
+		if conn, ok := conn.?; ok {
+			c = conn
+		} else if len_dg >= 1200 {
+			c = create_conn(p, peer)
+		}
+		ack_eliciting, err := handle_initial(c, p, peer)
+		if err != nil {
+			close_conn(c, err) // maybe swap with handle_transport_error?
+		} else {
+			queue_ack(c, p, ack_eliciting)
+		}
 
-		} else do return
 	case:
 		// if a packet isn't an initial
 		// and we don't have a connection for it
 		// then jusd drop the packet
 		return
 	}
+	return
 }
 
 
@@ -116,15 +130,41 @@ handle_transport_error :: proc(conn: Maybe(^Conn), error: Transport_Error) {
 
 
 queue_ack :: proc(conn: ^Conn, packet: Packet, ack_eliciting: bool) {
-	if conn == nil do return
+	assert(conn != nil, "Received nil conn")
+
+	pkt_number: u32
+	pn_space: Packet_Number_Space
+
+	#partial switch p in packet {
+	case Initial_Packet:
+		pkt_number = p.packet_number
+		pn_space = .Initial
+	case Handshake_Packet:
+		pkt_number = p.packet_number
+		pn_space = .Handshake
+	case Zero_RTT_Packet:
+	// we don't get here unless we were able to actually decrypt
+	// the packet.
+	// and in THIS version we don't buffer it if we can't
+	// decrypt it or we don't have keys
+		pkt_number = p.packet_number
+		pn_space = .Application
+	case One_RTT_Packet:
+		pkt_number = p.packet_number
+		pn_space = .Application
+		case:
+		unreachable()
+
+	}
 
 }
 
 queue_reset_stream :: proc(conn: ^Conn, stream_id: u64) {
-
+	assert(false, "not implemented")
 }
 
 store_token :: proc(conn: ^Conn, token: []byte) {
+	assert(false, "not implemented")
 }
 
 // add stream data to buffer for application to read
@@ -132,7 +172,7 @@ store_token :: proc(conn: ^Conn, token: []byte) {
 // if len(stream_data) + offset - bytes_read  > len(stream_buffer)
 buffer_stream :: proc(
 	conn: ^Conn,
-	stream: Stream,
+	stream: ^Stream, // FIXME: Make sure we have a lock when we get here
 	offset: u64,
 	stream_data: []byte,
 ) -> Transport_Error {
@@ -165,7 +205,7 @@ retire_connection_ids :: proc(
 	conn: ^Conn,
 	retire_prior_to: u64,
 ) -> Transport_Error {
-	#assert(false, "not implemented")
+	assert(false, "not implemented")
 	return nil
 }
 
@@ -178,7 +218,7 @@ add_connection_id :: proc(
 	connection_id: []u8,
 	stateless_reset_token: ^[16]u8,
 ) -> Transport_Error {
-	#assert(false, "not implemented")
+	assert(false, "not implemented")
 	return nil
 
 }
@@ -189,11 +229,12 @@ remove_connection_ids :: proc(
 	conn: ^Conn,
 	seq_number: u64,
 ) -> Transport_Error {
-	#assert(false, "not implemented")
+	assert(false, "not implemented")
 	return nil
 }
 
 queue_path_response :: proc(conn: ^Conn, data: u64) {
+	assert(false, "not implemented")
 }
 
 handle_ack :: proc(
@@ -201,13 +242,14 @@ handle_ack :: proc(
 	frame: ^Ack_Frame,
 	packet_number_space: Packet_Number_Space,
 ) -> Transport_Error {
-	#assert(false, "handle_ack is not implemented")
+	assert(false, "handle_ack is not implemented")
 	return nil
 }
 
 handle_initial :: proc(
 	conn: ^Conn,
 	packet: Initial_Packet,
+	peer: net.Endpoint,
 ) -> (
 	ack_eliciting: bool,
 	err: Transport_Error,
@@ -238,6 +280,7 @@ handle_initial :: proc(
 handle_handshake :: proc(
 	conn: ^Conn,
 	packet: Handshake_Packet,
+	peer: net.Endpoint,
 ) -> (
 	ack_eliciting: bool,
 	err: Transport_Error,
@@ -266,7 +309,12 @@ handle_handshake :: proc(
 }
 
 // client only 
-handle_retry :: proc(conn: ^Conn, packet: Retry_Packet) -> Transport_Error {
+handle_retry :: proc(
+	conn: ^Conn,
+	packet: Retry_Packet,
+	peer: net.Endpoint,
+) -> Transport_Error {
+	assert(false, "not implemented")
 	return nil
 
 }
@@ -274,6 +322,7 @@ handle_retry :: proc(conn: ^Conn, packet: Retry_Packet) -> Transport_Error {
 handle_zero_rtt :: proc(
 	conn: ^Conn,
 	packet: Zero_RTT_Packet,
+	peer: net.Endpoint,
 ) -> (
 	ack_eliciting: bool,
 	err: Transport_Error,
@@ -288,7 +337,7 @@ handle_zero_rtt :: proc(
 			err = .PROTOCOL_VIOLATION
 			return
 		case:
-			ack_eliciting ||= handle_app_level(conn, frame^) or_return
+			ack_eliciting ||= handle_app_level(conn, frame^, peer) or_return
 		}
 	}
 	return
@@ -297,12 +346,13 @@ handle_zero_rtt :: proc(
 handle_one_rtt :: proc(
 	conn: ^Conn,
 	packet: One_RTT_Packet,
+	peer: net.Endpoint,
 ) -> (
 	ack_eliciting: bool,
 	err: Transport_Error,
 ) {
 	for frame in packet.packet_payload {
-		ack_eliciting ||= handle_app_level(conn, frame^) or_return
+		ack_eliciting ||= handle_app_level(conn, frame^, peer) or_return
 	}
 	return
 }
@@ -310,6 +360,7 @@ handle_one_rtt :: proc(
 handle_app_level :: proc(
 	conn: ^Conn,
 	frame: Frame,
+	peer: net.Endpoint,
 ) -> (
 	ack_eliciting: bool,
 	err: Transport_Error,
@@ -485,7 +536,7 @@ handle_app_level :: proc(
 	case ^Handshake_Done_Frame:
 		conn.state = .Secured
 	case ^Datagram_Frame:
-		handle_datagram_frame(conn, f^)
+		handle_datagram_frame(conn, f^, peer)
 		ack_eliciting = true
 	case:
 		err = .PROTOCOL_VIOLATION
@@ -494,4 +545,15 @@ handle_app_level :: proc(
 	return
 }
 
-handle_datagram_frame :: proc(conn: ^Conn, frame: Frame) {}
+handle_datagram_frame :: proc(
+	conn: ^Conn,
+	frame: Frame,
+	peer: net.Endpoint,
+) -> (
+	ack_eliciting: bool,
+	err: Transport_Error,
+) {
+	cb, ok := Global_Context.callbacks.datagram_frame_callback.?
+	cb(conn, frame.variant.(^Datagram_Frame).data)
+	return
+}

@@ -32,8 +32,6 @@ Connection_State :: enum {
 
 Connection_Ids :: #soa[]Connection_Id_St
 
-Packet_Number_Space_State :: struct {} // TODO implement maybe
-
 Path_Validation_State :: enum {
 	Validating,
 	Valid,
@@ -94,6 +92,7 @@ Paths :: map[net.Endpoint]Path
 // FIXME: You should be able to configure these
 // somehow, maybe in your make_conn method
 Conn :: struct {
+	//generation: u32,
 	// These should be replaced with tracking on connection_params
 	send_max_data:                 u64, // number of bytes allowed through
 	receive_max_data:              u64, // number of bytes allowed through
@@ -130,16 +129,18 @@ Conn :: struct {
 	paths:                         Paths,
 	acks:                          Ack_State,
 	send:                          Send_State,
-	realtime:                      Send_State,
 	endpoint:                      net.Endpoint,
 }
 
 Send_State :: [Packet_Number_Space]struct {
-	lock:         sync.Mutex,
-	queue:        [dynamic]^Frame, // TODO: swap for ring buffer
-	crypto:       [4096]u8,
-	crypto_len:   uint,
-	crypto_flush: bool,
+	lock:          sync.Mutex,
+	queue:         [dynamic]^Frame, // TODO: swap for ring buffer
+	crypto:        [4096]u8,
+	ack:           [dynamic]u64,
+	ack_elicited:  bool,
+	crypto_len:    uint,
+	crypto_flush:  bool,
+	packet_number: u64,
 }
 
 

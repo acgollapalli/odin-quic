@@ -9,6 +9,7 @@ SDG                                                                           JJ
   resizeable by design.
 
 */
+
 package data_structs
 
 import "core:sync"
@@ -54,7 +55,7 @@ make_queue :: proc($T: typeid, $buf_len: int) -> Queue(^T, buf_len) {
 */
 write :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
 	defer if !ok do sync.atomic_sub(&q.len, 1)
-	sync.atomic_add(&q.len, 1) <= buf_len or_return
+	(sync.atomic_add(&q.len, 1) <= buf_len) or_return
 	
 	idx := _inc_rem(&queue.write, buf_len)
 	sync.atomic_store(&q.buf[idx], val)
@@ -68,7 +69,7 @@ write :: proc(q: ^Queue(^$T, $buf_len), val: ^T) -> (ok: bool) {
 */
 read :: proc(q: ^Queue(^$T, $buf_len)) -> (ptr: ^T, ok: bool) {
 	defer if !ok do sync.atomic_add(&q.len, 1)
-	sync.atomic_sub(&q.len, 1) >= 0 or_return
+	(sync.atomic_sub(&q.len, 1) >= 0) or_return
 
 	defer if !ok do _dec_rem(&queue.read, buf_len)
 	idx := _inc_rem(&queue.read, buf_len)

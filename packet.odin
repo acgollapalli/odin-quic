@@ -13,6 +13,8 @@ Packet :: union {
 	One_RTT_Packet,
 }
 
+// TODO: Refactor for Tagged Unions so we can use a LUT instead of
+// switch statements everywhere
 Packet_Type :: enum {
 	Version_Negotiation,
 	Initial,
@@ -133,11 +135,11 @@ make_packet :: proc(
 	dg_buf: []byte,
 	alloc := context.allocator,
 ) -> (
-	pkt: Packet,
 	plen: int,
 ) {
-	#assert(
+	assert(
 		false,
 		"Not implemented yet, because serialization was written with bad assumptions,",
 	)
+	return 0
 }
