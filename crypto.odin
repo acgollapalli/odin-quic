@@ -213,10 +213,11 @@ aes_ecb_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
 	ctx: aes.Context_ECB
 	defer (aes.reset_ecb(&ctx))
 	fmt.println("initializing initial secret context, w/ key_len:", len(hp_key))
+	fmt.printfln("sample: %x", sample)
 	aes.init_ecb(&ctx, hp_key)
 	dst := make([]byte, 16) // FIXME: maybe a temp allocator here?
-	aes.decrypt_ecb(&ctx, dst, sample)
-	fmt.println("got header mask: ", dst)
+	aes.encrypt_ecb(&ctx, dst, sample) // Simple XOR of the same value that is 
+	fmt.printfln("got header mask: %x", dst)
 	return dst[0:5]
 }
 
@@ -233,7 +234,12 @@ chacha_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
 }
 
 // FIXME: Do we need a decryption error here?
-remove_header_protection :: proc(
+remove_header_protection :: proc {
+	remove_header_protection_deprecated,
+	remove_header_protection_with_pn_len,
+}
+// FIXME: remove and make this NOT a procedure groupe
+remove_header_protection_deprecated :: proc(
 	first_byte: byte,
 	packet: []byte,
 	mask: []byte,
@@ -256,7 +262,7 @@ remove_header_protection :: proc(
 	}
 	fmt.printfln("decrypted first byte %x", first_byte)
 
-	packet_number_length := first_byte & 0x03 // will index off this?
+	packet_number_length := first_byte & 0x03 + 1 // will index off this?
 	fmt.println("packet number length", packet_number_length)
 
 	packet_number_bytes := packet[:packet_number_length]
@@ -265,11 +271,53 @@ remove_header_protection :: proc(
 	// remove the protection on the packet number
 	packet_number: u32
 	for i := 0; i < len(packet_number_bytes); i += 1 {
-		unmasked_byte := packet_number_bytes[i] ~ mask[i + 1]
-		packet_number = u32(unmasked_byte) + (packet_number << 8)
+		packet_number_bytes[i] ~= mask[i + 1]
+		packet_number = u32(packet_number_bytes[i]) + (packet_number << 8)
 	}
 
 	return first_byte, packet_number, packet
+}
+
+// FIXME: remove and make this NOT a procedure groupe
+remove_header_protection_with_pn_len :: proc(
+	first_byte: byte,
+	packet: []byte,
+	mask: []byte,
+	_: bool
+) -> (
+	byte,
+	u32,
+	int,
+	[]byte,
+) {
+	first_byte := first_byte
+	packet := packet
+
+	fmt.printfln("first byte %x", first_byte)
+	// remove the proection on the first byte
+	if (first_byte & 0x80) == 0x80 {
+		// long header
+		first_byte ~= (mask[0] & 0x0f)
+	} else {
+		// short header
+		first_byte = first_byte ~ (mask[0] & 0x1f)
+	}
+	fmt.printfln("decrypted first byte %x", first_byte)
+
+	packet_number_length := first_byte & 0x03 + 1 // will index off this?
+	fmt.println("packet number length", packet_number_length)
+
+	packet_number_bytes := packet[:packet_number_length]
+	packet = packet[packet_number_length:]
+
+	// remove the protection on the packet number
+	packet_number: u32
+	for i := 0; i < len(packet_number_bytes); i += 1 {
+		packet_number_bytes[i] ~= mask[i + 1]
+		packet_number = u32(packet_number_bytes[i]) + (packet_number << 8)
+	}
+
+	return first_byte, packet_number, int(packet_number_length), packet
 }
 
 
@@ -352,7 +400,7 @@ tlsv13_expand_label :: proc(
 	 1: null char at the end of the HkdfLabel
     */
 	label_length :: 2 + 1 + len(prefix) + len(label) + 1
-	hkdf_label: [label_length]u8 
+	hkdf_label: [label_length]u8
 
 	// let's generate the HkdfLabel
 	hkdf_label[0] = u8(u16(k_len) >> 8)
@@ -384,23 +432,14 @@ determine_initial_secret :: proc(
 	hkdf.extract(hash.Algorithm.SHA256, salt, dest_conn_id, initial_secret[:])
 
 	client := tlsv13_expand_label(initial_secret[:], "client in", .SHA256, 32)
-	client_key := tlsv13_expand_label(
-		initial_secret[:],
-		"client_key",
-		.SHA256,
-		16,
-	)
-	fmt.printfln("CLIENT KEY %x", client_key)
+	defer delete(client)
+	client_key := tlsv13_expand_label(client, "quic key", .SHA256, 16)
 	client_iv := tlsv13_expand_label(client, "quic iv", .SHA256, 12)
 	client_hp := tlsv13_expand_label(client, "quic hp", .SHA256, 16)
 
 	server := tlsv13_expand_label(initial_secret[:], "server in", .SHA256, 32)
-	server_key := tlsv13_expand_label(
-		initial_secret[:],
-		"server key",
-		.SHA256,
-		16,
-	)
+	defer delete(server)
+	server_key := tlsv13_expand_label(client, "quic key", .SHA256, 16)
 	server_iv := tlsv13_expand_label(server, "quic iv", .SHA256, 12)
 	server_hp := tlsv13_expand_label(server, "quic hp", .SHA256, 16)
 
@@ -409,7 +448,9 @@ determine_initial_secret :: proc(
 	// only connections in the server role ever call this function
 	// so we know that .Read is the client secret
 	secret[.Read].key = client_key
+	fmt.printfln("client_key %x", client_key)
 	secret[.Read].hp = client_hp
+	fmt.printfln("client_hp_key %x", client_hp)
 	secret[.Read].iv = client_iv
 	secret[.Read].valid = true // maybe need to deprecate
 	secret[.Read].cipher = .AEAD_AES_128_GCM // always this for initial
@@ -466,6 +507,7 @@ protect_payload :: proc(
 
 	// helper function to get the nonce
 	get_nonce :: proc(iv: []u8, packet_number: u32) -> []u8 {
+		assert(false, "This needs to use u64")
 		nonce := make([]u8, len(iv))
 		for i: u8 = 0; i < 4; i += 1 {
 			nonce[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) // nonce is padded w/ zeroes 
@@ -540,6 +582,63 @@ encrypt_payload :: proc(
 		chacha_poly1305.seal(&ctx, cipher_text, tag, iv, associated_data, payload)
 	}
 }
+
+decrypt_payload :: proc {
+	decrypt_payload_with_conn,
+	decrypt_payload_with_secrets,
+}
+
+decrypt_payload_with_conn :: proc() {
+	assert(false, "not implemented")
+}
+
+// helper function to get the nonce
+get_nonce :: proc(iv: []u8, packet_number: u64, out: []u8) {
+	for i: u8 = 0; i < 8; i += 1 {
+		out[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) // nonce is padded w/ zeroes 
+	}
+	for &b, i in out {
+		b ~= iv[i] // bitwise xor with iv
+	}
+	fmt.printfln("Using nonce: %x", out)
+	return
+}
+
+decrypt_payload_with_secrets :: proc(
+	payload: []u8,
+	header: []u8,
+	packet_number: u64,
+	secrets: [Secret_Role]TLS_Secret,
+) -> (
+	ok: bool,
+) {
+	s := secrets[.Read]
+	nonce := make([]u8, len(s.iv)) // FIXME: Maybe use temp allocator here
+	defer delete(nonce)
+	fmt.printfln("decryption key: %x", s.key)
+	get_nonce(s.iv, packet_number, nonce)
+	fmt.printfln("nonce: %x", nonce)
+	fmt.printfln("header: %x", header)
+
+	switch s.cipher {
+	case .AEAD_AES_128_GCM, .AEAD_AES_256_GCM:
+		dst := payload[:len(payload) - 16]
+		tag := payload[len(payload) - 16:]
+
+		ctx: aes.Context_GCM
+		aes.init_gcm(&ctx, s.key)
+		ok = aes.open_gcm(&ctx, dst, nonce, header, dst, tag)
+	case .AEAD_CHACHA20_POLY1305:
+		dst := payload[:len(payload) - 16]
+		tag := payload[len(payload) - 16:]
+
+		ctx: chacha_poly1305.Context
+		chacha_poly1305.init(&ctx, s.key)
+		ok = chacha_poly1305.open(&ctx, dst, nonce, header, dst, tag)
+	}
+	return
+}
+
 
 // TODO 
 generate_retry_token :: proc(dest_conn_id: []byte) {}

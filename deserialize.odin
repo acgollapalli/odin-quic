@@ -7,9 +7,9 @@ SDG                                                                            J
 package quic
 
 import ssl "../ssl"
+import "core:fmt"
 import "core:net"
 import "core:sync"
-import "core:fmt"
 
 Partial_Packet :: struct {
 	first_byte:   byte,
@@ -19,17 +19,22 @@ Partial_Packet :: struct {
 }
 
 
-handle_datagram :: proc(dg: []byte, peer: net.Endpoint) {
+handle_datagram :: proc(initdg: []byte, peer: net.Endpoint) {
 	dest_conn_id: Connection_Id
 	conn: Maybe(^Conn) // we don't know the connn til we have the dest_conn_id
 
-	len_dg := len(dg)
+	len_dg := len(initdg)
 
-	for dg := dg; len(dg) > 0; {
+	for dg := initdg; len(dg) > 0; {
+		fmt.println("Len dg", len(dg))
 		//fmt.println("current dg:", dg)
-		packet, dg, err := process_incoming_packet(dg) // FIXME: pass conn here
+		packet, remaining_dg, err := process_incoming_packet(dg) // FIXME: pass conn here
+		dg = remaining_dg
 
-		fmt.printfln("Getting dest_conn_id: %v from packet", get_dest_conn_id(packet))
+		fmt.printfln(
+			"Getting dest_conn_id: %v from packet",
+			get_dest_conn_id(packet),
+		)
 		fmt.println("Recieved this packet: ", packet)
 
 		// establish our baselines
@@ -40,8 +45,8 @@ handle_datagram :: proc(dg: []byte, peer: net.Endpoint) {
 			handle_transport_error(conn, err)
 			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
-			packet != nil {
-				fmt.println("Recieved this packet: ", packet)
+		   packet != nil {
+			fmt.println("Recieved this packet: ", packet)
 			// TODO: This should MAYBE put the packet on thread specific queue
 			//handle_incoming_packet(conn, packet, len_dg, peer)
 		}
@@ -59,6 +64,7 @@ process_incoming_packet :: proc(
 	Transport_Error,
 ) {
 	packet := packet // let's mutate the slice as we iterate
+	full_packet := packet
 
 	/* This is under header protection
        and we can't read the latter half of it yet
@@ -67,7 +73,7 @@ process_incoming_packet :: proc(
 	packet_type := what_kind_of_packet(first_byte)
 	packet = packet[1:]
 
-	version: u32 
+	version: u32
 	dest_conn_id_len: u8
 	src_conn_id_len: u8
 	dest_conn_id: []u8 // maybe we --- this?
@@ -84,7 +90,7 @@ process_incoming_packet :: proc(
 		for b in packet[0:4] {
 			version = (u32)(b) + (version << 8)
 		}
-		if version == 0{
+		if version == 0 {
 			packet_type = .Version_Negotiation
 		}
 		packet = packet[4:]
@@ -129,7 +135,7 @@ process_incoming_packet :: proc(
 
 	switch packet_type {
 	case .Initial:
-		return process_initial(partial_packet, packet)
+		return process_initial(partial_packet, full_packet, packet)
 	case .Handshake:
 		return process_handshake(partial_packet, packet)
 	case .Retry:
@@ -142,7 +148,10 @@ process_incoming_packet :: proc(
 		return process_one_rtt(partial_packet, packet)
 	}
 
-	return nil, nil, nil // THIS WILL NEVER RUN, BUT THE BUGGY COMPILER THINKS DIFFERENT
+	return nil, nil, nil
+	// THIS WILL NEVER RUN, but per K&R, not having
+	// the end is a sign of poorly written code, and it's
+	// probably a good thing the compiler vets for it.
 }
 
 get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
@@ -165,7 +174,7 @@ get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
 		n = u64(packet[i]) + (n << 8)
 	}
 
-	fmt.printfln("variable length int %v from bytes:%v",n, packet[0:len])
+	//	fmt.printfln("variable length int %v from bytes:%v",n, packet[0:len])
 	return
 }
 
@@ -195,6 +204,7 @@ what_kind_of_packet :: proc(first_byte: byte) -> Packet_Type {
 
 process_initial :: proc(
 	using partial: Partial_Packet,
+	full_packet: []u8,
 	packet: []u8,
 ) -> (
 	pkt: Packet,
@@ -206,6 +216,7 @@ process_initial :: proc(
 	// REMINDER: keys are determined by the FIRST initial packet. Any subsequent ones that aren't determined
 	// by a retry use the same keys. On a retry. The keys should be marked INVALID.
 	role: Role
+	secrets: [Secret_Role]TLS_Secret
 	hp_key: []byte
 	if conn, c_ok := find_conn(dest_conn_id); c_ok {
 		sync.shared_guard(&conn.encryption.lock)
@@ -213,17 +224,18 @@ process_initial :: proc(
 			conn.encryption.secrets[.Initial_Encryption][.Read].valid,
 			"invalid secret",
 		)
-		hp_key := conn.encryption.secrets[.Initial_Encryption][.Read].hp
+
+		secrets = conn.encryption.secrets[.Initial_Encryption]
 	} else {
 		// FIXME: we should CONSIDER adding the conn here (BUT...
 		// it's based off the dest id, so do we NEED TO? maybe
 		// it should be handled by the frame handler, not down here)
 
 		//fmt.println("received initial packet with no associated conn")
-		secrets := determine_initial_secret(dest_conn_id)
-		hp_key = secrets[.Read].hp
-		fmt.printfln("header protection key: %x", hp_key)
+		secrets = determine_initial_secret(dest_conn_id)
 	}
+	hp_key = secrets[.Read].hp
+	//fmt.printfln("header protection key: %x", hp_key)
 
 	// FIXME: Should we be decrypting packet protection here?
 	token_length, tk_offset := get_variable_length_int(packet)
@@ -236,24 +248,44 @@ process_initial :: proc(
 	packet = packet[pl_offset:] // FIXME: Maybe the function can do this part?
 
 
-	fmt.println("getting header mask: ")
+	//fmt.println("getting header mask: ")
 	mask := get_header_mask(
 		hp_key,
 		packet[4:20],
 		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
 	)
-	fmt.println("header mask: ", mask)
+	//fmt.println("header mask: ", mask)
 	packet_number: u32
-	_, packet_number, packet = remove_header_protection(first_byte, packet, mask)
+	pn_len: int
+	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+		first_byte,
+		packet,
+		mask,
+		true
+	)
 
-	fmt.println("packet_number: ", packet_number)
-	fmt.println("packet: ", packet)
-	fmt.println("payload_len:", payload_length, len(packet))
-	
-	packet_payload := packet[:payload_length]
-	packet = packet[payload_length:]
+	//fmt.println("packet_number: ", packet_number)
+	//fmt.println("packet: ", packet)
+	//fmt.println("payload_len:", payload_length, len(packet))
 
-	frames := read_frames(packet_payload) or_return
+	// NOTE: header_length (for assocated data for decryption) includes the
+	// length of the packet number. However, the payload length field in the
+	// packet also includes the length of the packet number.
+	// so the actual payload length and the header length need to be adjusted
+	// to account for this
+	payload := packet[:int(payload_length) - pn_len]
+	header_length := len(full_packet) + pn_len - int(payload_length)
+	header := full_packet[:header_length]
+
+	if !decrypt_payload(payload, header, u64(packet_number), secrets) {
+		// drop the packet and the rest of the datagram if we can't
+		// decrypt it
+		return nil, nil, nil
+	}
+
+	fmt.println("packet_payload: %x", payload)
+
+	frames := read_frames(payload) or_return
 
 	return Initial_Packet {
 			version = version,
@@ -263,7 +295,7 @@ process_initial :: proc(
 			token = token,
 			packet_payload = frames,
 		},
-		packet,
+		packet[payload_length:],
 		nil
 }
 
@@ -448,10 +480,10 @@ process_one_rtt :: proc(
 		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object
 	}
 	mask, mask_ok = get_header_mask(
-			packet[4:20],
-			conn,
-			ssl.QUIC_Encryption_Level.Application_Encryption,
-			Secret_Role.Read,
+		packet[4:20],
+		conn,
+		ssl.QUIC_Encryption_Level.Application_Encryption,
+		Secret_Role.Read,
 	)
 	if !mask_ok do return
 

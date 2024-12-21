@@ -46,10 +46,10 @@ main :: proc() {
 		) {fmt.println("new datagram received: %v, on conn: %v", data, conn)},
 	}
 
-	key := hex_decode_const("7db5df06e7a69e432496adedb0085192" +
-							"3595221596ae2ae9fb8115c1e9ed0a44")
-	fmt.printfln("initial_secret: %x", key)
-	fmt.printfln("client_initial_secret: %x", tlsv13_expand_label(key, "client in", .SHA256, 32))
+//	key := hex_decode_const("7db5df06e7a69e432496adedb0085192" +
+//							"3595221596ae2ae9fb8115c1e9ed0a44")
+//	fmt.printfln("initial_secret: %x", key)
+//	fmt.printfln("client_initial_secret: %x", tlsv13_expand_label(key, "client in", .SHA256, 32))
 
-	//init(.Server, callbacks)
+	init(.Server, callbacks)
 }
