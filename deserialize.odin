@@ -9,6 +9,7 @@ package quic
 import ssl "../ssl"
 import "core:net"
 import "core:sync"
+import "core:fmt"
 
 Partial_Packet :: struct {
 	first_byte:   byte,
@@ -24,8 +25,12 @@ handle_datagram :: proc(dg: []byte, peer: net.Endpoint) {
 
 	len_dg := len(dg)
 
-	for len(dg) > 0 {
+	for dg := dg; len(dg) > 0; {
+		//fmt.println("current dg:", dg)
 		packet, dg, err := process_incoming_packet(dg) // FIXME: pass conn here
+
+		fmt.printfln("Getting dest_conn_id: %v from packet", get_dest_conn_id(packet))
+		fmt.println("Recieved this packet: ", packet)
 
 		// establish our baselines
 		if dest_conn_id == nil do dest_conn_id = get_dest_conn_id(packet)
@@ -35,9 +40,10 @@ handle_datagram :: proc(dg: []byte, peer: net.Endpoint) {
 			handle_transport_error(conn, err)
 			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
-		   packet != nil {
+			packet != nil {
+				fmt.println("Recieved this packet: ", packet)
 			// TODO: This should MAYBE put the packet on thread specific queue
-			handle_incoming_packet(conn, packet, len_dg, peer)
+			//handle_incoming_packet(conn, packet, len_dg, peer)
 		}
 	}
 }
@@ -60,8 +66,8 @@ process_incoming_packet :: proc(
 	first_byte := packet[0]
 	packet_type := what_kind_of_packet(first_byte)
 	packet = packet[1:]
-	version: u32 // 1-RTT packets don't have this, so we don't know if this is defined
 
+	version: u32 
 	dest_conn_id_len: u8
 	src_conn_id_len: u8
 	dest_conn_id: []u8 // maybe we --- this?
@@ -78,6 +84,9 @@ process_incoming_packet :: proc(
 		for b in packet[0:4] {
 			version = (u32)(b) + (version << 8)
 		}
+		if version == 0{
+			packet_type = .Version_Negotiation
+		}
 		packet = packet[4:]
 
 		// get the length of the connection id
@@ -91,6 +100,9 @@ process_incoming_packet :: proc(
 			dest_conn_id = packet[0:dest_conn_id_len]
 			packet = packet[dest_conn_id_len:]
 
+			src_conn_id_len = packet[0]
+			packet = packet[1:]
+
 			if src_conn_id_len > 20 && packet_type != .Version_Negotiation {
 				// ONLY holds for version 1 and 2 at the moment
 				return nil, nil, .PROTOCOL_VIOLATION
@@ -99,6 +111,8 @@ process_incoming_packet :: proc(
 			packet = packet[src_conn_id_len:]
 		}
 	}
+
+	//fmt.printfln("We've received a packet type of %v, of version %v, with dest_conn_id: %v, and src_conn_id: %v", packet_type, version, dest_conn_id, src_conn_id)
 
 	/*
      * We've about reached the point where we can read anything that's unprotected
@@ -133,7 +147,7 @@ process_incoming_packet :: proc(
 
 get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
 	two_msb := packet[0] >> 6
-	n = u64(packet[0]) &~ (2 << 6)
+	n = u64(packet[0] &~ 0xc0)
 
 	switch two_msb {
 	case 0x00:
@@ -150,21 +164,24 @@ get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
 	for i := 1; i < len; i += 1 {
 		n = u64(packet[i]) + (n << 8)
 	}
+
+	fmt.printfln("variable length int %v from bytes:%v",n, packet[0:len])
 	return
 }
 
 what_kind_of_packet :: proc(first_byte: byte) -> Packet_Type {
-	is_long_header := (first_byte & (1 << 7)) != 0 // first bit
-	is_fixed_bit := (first_byte & (1 << 6)) != 0 // second bit
+	is_long_header := first_byte & 0x80 != 0 // first bit
+	is_fixed_bit := first_byte & 0x40 != 0 // second bit
+
 
 	// getting the conn_id_length (see packet.odin)
 	if is_long_header {
-		if is_fixed_bit {
+		if !is_fixed_bit {
 			return .Version_Negotiation
 		} else {
 			first_byte := first_byte
-			first_byte = first_byte << 2
-			first_byte = first_byte >> 6
+			first_byte &~= 0xcf // clear first two and last four bits
+			first_byte = first_byte >> 4
 
 			// first byte now only has bits 5 and 6
 			// long header packets are 0x01 through 0x03
@@ -201,8 +218,11 @@ process_initial :: proc(
 		// FIXME: we should CONSIDER adding the conn here (BUT...
 		// it's based off the dest id, so do we NEED TO? maybe
 		// it should be handled by the frame handler, not down here)
+
+		//fmt.println("received initial packet with no associated conn")
 		secrets := determine_initial_secret(dest_conn_id)
 		hp_key = secrets[.Read].hp
+		fmt.printfln("header protection key: %x", hp_key)
 	}
 
 	// FIXME: Should we be decrypting packet protection here?
@@ -216,14 +236,20 @@ process_initial :: proc(
 	packet = packet[pl_offset:] // FIXME: Maybe the function can do this part?
 
 
+	fmt.println("getting header mask: ")
 	mask := get_header_mask(
 		hp_key,
 		packet[4:20],
 		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
 	)
+	fmt.println("header mask: ", mask)
 	packet_number: u32
 	_, packet_number, packet = remove_header_protection(first_byte, packet, mask)
 
+	fmt.println("packet_number: ", packet_number)
+	fmt.println("packet: ", packet)
+	fmt.println("payload_len:", payload_length, len(packet))
+	
 	packet_payload := packet[:payload_length]
 	packet = packet[payload_length:]
 

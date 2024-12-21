@@ -1,6 +1,8 @@
 /* MOVE THESE SOMEWHERE ELSE */
 package quic
 import "core:sys/posix"
+import "core:net"
+import "core:fmt"
 
 //_unwrap_os_addr :: proc "contextless" (endpoint: net.Endpoint)->(linux.Sock_Addr_Any) {
 //	switch address in endpoint.address {
@@ -143,7 +145,7 @@ Socket_Msg :: bit_set[Socket_Msg_Bits; i32]
 /*
 	Struct representing IPv4 socket address.
 */
-Sock_Addr_In :: struct #packed {
+Sock_Addr_In :: struct  {
 	sin_family: Address_Family,
 	sin_port:   u16be,
 	sin_addr:   [4]u8,
@@ -152,7 +154,7 @@ Sock_Addr_In :: struct #packed {
 /*
 	Struct representing IPv6 socket address.
 */
-Sock_Addr_In6 :: struct #packed {
+Sock_Addr_In6 :: struct  {
 	sin6_family:   Address_Family,
 	sin6_port:     u16be,
 	sin6_flowinfo: u32,
@@ -163,7 +165,7 @@ Sock_Addr_In6 :: struct #packed {
 /*
 	Struct representing Unix Domain Socket address
 */
-Sock_Addr_Un :: struct #packed {
+Sock_Addr_Un :: struct {
 	sun_family: Address_Family,
 	sun_path:   [108]u8,
 }
@@ -179,4 +181,22 @@ Sock_Addr_Any :: struct #raw_union {
 	using ipv4: Sock_Addr_In,
 	using ipv6: Sock_Addr_In6,
 	using uds: Sock_Addr_Un,
+}
+
+unwrap_sock_addr :: proc(addr: Sock_Addr_Any) -> net.Endpoint {
+//	fmt.println("raw_data", transmute([110]u8)addr)
+	#partial switch addr.family {
+	case .INET, .NETLINK:
+		return {
+			address = cast(net.IP4_Address) addr.sin_addr,
+			port = cast(int) addr.sin_port,
+		}
+	case .INET6:
+		return {
+			port = cast(int) addr.sin6_port,
+			address = transmute(net.IP6_Address) addr.sin6_addr,
+		}
+	case:
+		unreachable()
+	}
 }

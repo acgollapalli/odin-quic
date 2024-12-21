@@ -11,6 +11,7 @@ import chacha_poly1305 "core:crypto/chacha20poly1305"
 import "core:crypto/hash"
 import "core:crypto/hkdf"
 import "core:encoding/hex"
+import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -54,6 +55,17 @@ get_cipher :: proc "c" (
 	return nil
 }
 
+Key_Len := [Packet_Protection_Algorithm]int {
+	.AEAD_AES_128_GCM       = 16,
+	.AEAD_AES_256_GCM       = 32,
+	.AEAD_CHACHA20_POLY1305 = 32,
+}
+
+Hash_Algo := [Packet_Protection_Algorithm]hash.Algorithm {
+	.AEAD_AES_128_GCM       = .SHA256,
+	.AEAD_AES_256_GCM       = .SHA384,
+	.AEAD_CHACHA20_POLY1305 = .SHA256,
+}
 
 TLS_Secret :: struct {
 	//	secret: []byte,
@@ -173,13 +185,22 @@ get_header_mask_w_conn :: proc(
 	conn: ^Conn,
 	encryption_level: ssl.QUIC_Encryption_Level,
 	role: Secret_Role,
-) -> (val: []byte, ok: bool) {
+) -> (
+	val: []byte,
+	ok: bool,
+) {
 	has_valid_secret(conn, encryption_level, role) or_return
 	hp_key, algo := get_hp_key_and_algo(conn, encryption_level, role)
 	return get_header_mask_proper(hp_key, sample, algo), true
 }
 
-has_valid_secret :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level, role: Secret_Role) -> (ok: bool) {
+has_valid_secret :: proc(
+	conn: ^Conn,
+	level: ssl.QUIC_Encryption_Level,
+	role: Secret_Role,
+) -> (
+	ok: bool,
+) {
 	sync.shared_guard(&conn.encryption.lock)
 	return conn.encryption.secrets[level][role].valid
 }
@@ -191,10 +212,12 @@ has_valid_secret :: proc(conn: ^Conn, level: ssl.QUIC_Encryption_Level, role: Se
 aes_ecb_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
 	ctx: aes.Context_ECB
 	defer (aes.reset_ecb(&ctx))
+	fmt.println("initializing initial secret context, w/ key_len:", len(hp_key))
 	aes.init_ecb(&ctx, hp_key)
-	dst := make([]byte, 5) // FIXME: maybe a temp allocator here?
+	dst := make([]byte, 16) // FIXME: maybe a temp allocator here?
 	aes.decrypt_ecb(&ctx, dst, sample)
-	return dst
+	fmt.println("got header mask: ", dst)
+	return dst[0:5]
 }
 
 chacha_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
@@ -222,16 +245,19 @@ remove_header_protection :: proc(
 	first_byte := first_byte
 	packet := packet
 
+	fmt.printfln("first byte %x", first_byte)
 	// remove the proection on the first byte
 	if (first_byte & 0x80) == 0x80 {
 		// long header
-		first_byte = first_byte ~ (mask[0] & 0x0f)
+		first_byte ~= (mask[0] & 0x0f)
 	} else {
 		// short header
 		first_byte = first_byte ~ (mask[0] & 0x1f)
 	}
+	fmt.printfln("decrypted first byte %x", first_byte)
 
 	packet_number_length := first_byte & 0x03 // will index off this?
+	fmt.println("packet number length", packet_number_length)
 
 	packet_number_bytes := packet[:packet_number_length]
 	packet = packet[packet_number_length:]
@@ -280,22 +306,66 @@ add_header_protection :: proc(
 // FIXME: Make SURE that we're using an allocator that isn't trying to grab
 // each of these individually! BUT we only ever do it on key changes, so it's
 // probably not a huge deal
+/*
+  tlsv13_expand_label
+
+  As defined in RFC 8446
+       HKDF-Expand-Label(Secret, Label, Context, Length) =
+            HKDF-Expand(Secret, HkdfLabel, Length)
+
+       Where HkdfLabel is specified as:
+
+       struct {
+           uint16 length = Length;
+           opaque label<7..255> = "tls13 " + Label;
+           opaque context<0..255> = Context;
+       } HkdfLabel;
+
+Some notes. 
+  The Length param corresponds to the length of the output (k_len).
+  The label value in the label struct BEGINS with a 1 byte length parameter,
+   containing the length of the string.
+  The context is always zero.
+  The struct itself is null terminated.
+*/
 tlsv13_expand_label :: proc(
 	key: []u8,
 	$label: string,
 	algo: hash.Algorithm = hash.Algorithm.SHA256,
+	k_len: int,
 ) -> []byte {
-	out := make([]byte, 256)
-	hkdf_label: [len(label) + 9]u8 // these DO NOT have the null terminating byte
-	prefix: string = "tlsv13 "
+	out := make([]byte, k_len) // FIXME: Should provide this as a param
+	prefix :: "tls13 "
 
-	hkdf_label[1] = u8(len(label))
+	// building the HkdfLabel struct as a byte array
+
+	/*
+	 First we need to know how long the array should be.
+	 What do each of these numbers represent?
+	 
+	 2 : uint16 Length param
+	 1 : uint8 size of label
+	 len(prefix): length of the prefix above. Every hkdf
+	   expansion in tls1.3 starts with this prefix)
+	 len(label) : length of the string we actually
+	   use in the HKDF-Expand function
+	 1: null char at the end of the HkdfLabel
+    */
+	label_length :: 2 + 1 + len(prefix) + len(label) + 1
+	hkdf_label: [label_length]u8 
+
+	// let's generate the HkdfLabel
+	hkdf_label[0] = u8(u16(k_len) >> 8)
+	hkdf_label[1] = u8(k_len)
+	hkdf_label[2] = u8(len(prefix) + len(label))
 	for b, i in prefix {
-		hkdf_label[i + 2] = u8(b)
+		hkdf_label[i + 2 + 1] = u8(b)
 	}
 	for b, i in label {
-		hkdf_label[i + 9] = u8(b)
+		hkdf_label[i + len(prefix) + 3] = u8(b)
 	}
+	fmt.printfln("hkdf-label: %x", hkdf_label)
+	fmt.println("len label: ", len(hkdf_label))
 
 	hkdf.expand(algo, key, hkdf_label[:], out)
 	return out
@@ -310,27 +380,41 @@ determine_initial_secret :: proc(
 	salt := Initial_v1_Salt,
 ) -> [Secret_Role]TLS_Secret {
 	// can you allocate multiple values at once this way?
-	initial_secret: [256]u8
+	initial_secret: [32]u8
 	hkdf.extract(hash.Algorithm.SHA256, salt, dest_conn_id, initial_secret[:])
 
-	client := tlsv13_expand_label(initial_secret[:], "client in")
-	server := tlsv13_expand_label(initial_secret[:], "server in")
-	client_hp := tlsv13_expand_label(client, "quic hp")
-	server_hp := tlsv13_expand_label(server, "quic hp")
-	client_iv := tlsv13_expand_label(client, "quic iv")
-	server_iv := tlsv13_expand_label(server, "quic iv")
+	client := tlsv13_expand_label(initial_secret[:], "client in", .SHA256, 32)
+	client_key := tlsv13_expand_label(
+		initial_secret[:],
+		"client_key",
+		.SHA256,
+		16,
+	)
+	fmt.printfln("CLIENT KEY %x", client_key)
+	client_iv := tlsv13_expand_label(client, "quic iv", .SHA256, 12)
+	client_hp := tlsv13_expand_label(client, "quic hp", .SHA256, 16)
+
+	server := tlsv13_expand_label(initial_secret[:], "server in", .SHA256, 32)
+	server_key := tlsv13_expand_label(
+		initial_secret[:],
+		"server key",
+		.SHA256,
+		16,
+	)
+	server_iv := tlsv13_expand_label(server, "quic iv", .SHA256, 12)
+	server_hp := tlsv13_expand_label(server, "quic hp", .SHA256, 16)
 
 	secret: [Secret_Role]TLS_Secret
 
 	// only connections in the server role ever call this function
 	// so we know that .Read is the client secret
-	secret[.Read].key = client
+	secret[.Read].key = client_key
 	secret[.Read].hp = client_hp
 	secret[.Read].iv = client_iv
 	secret[.Read].valid = true // maybe need to deprecate
 	secret[.Read].cipher = .AEAD_AES_128_GCM // always this for initial
 
-	secret[.Write].key = server
+	secret[.Write].key = server_key
 	secret[.Write].hp = server_hp
 	secret[.Write].iv = server_iv
 	secret[.Write].valid = true // maybe need to deprecate
@@ -538,11 +622,14 @@ set_read_secret :: proc "c" (
 		conn.encryption.secrets[l][.Read] = e
 	}
 
+	key_len := Key_Len[e.cipher]
+	algo := Hash_Algo[e.cipher]
+
 	sync.guard(&conn.encryption.lock)
-	e.key = tlsv13_expand_label(secret[:slen], "quic key")
-	e.iv = tlsv13_expand_label(secret[:slen], "quic iv")
-	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
-	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
+	e.key = tlsv13_expand_label(secret[:slen], "quic key", algo, key_len)
+	e.iv = tlsv13_expand_label(secret[:slen], "quic iv", algo, 12)
+	e.hp = tlsv13_expand_label(secret[:slen], "quic hp", algo, key_len)
+	e.ku = tlsv13_expand_label(secret[:slen], "quic ku", algo, key_len)
 	e.valid = true
 	return 1
 }
@@ -565,11 +652,14 @@ set_write_secret :: proc "c" (
 		conn.encryption.secrets[l][.Write] = e
 	}
 
+	key_len := Key_Len[e.cipher]
+	algo := Hash_Algo[e.cipher]
+
 	sync.guard(&conn.encryption.lock)
-	e.key = tlsv13_expand_label(secret[:slen], "quic key")
-	e.iv = tlsv13_expand_label(secret[:slen], "quic iv")
-	e.hp = tlsv13_expand_label(secret[:slen], "quic hp")
-	e.ku = tlsv13_expand_label(secret[:slen], "quic ku")
+	e.key = tlsv13_expand_label(secret[:slen], "quic key", algo, key_len)
+	e.iv = tlsv13_expand_label(secret[:slen], "quic iv", algo, 12)
+	e.hp = tlsv13_expand_label(secret[:slen], "quic hp", algo, key_len)
+	e.ku = tlsv13_expand_label(secret[:slen], "quic ku", algo, key_len)
 	e.valid = true
 	return 1
 }

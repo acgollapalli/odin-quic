@@ -61,7 +61,7 @@ init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 	receive_thread := thread.create_and_start_with_poly_data(&endpoint, receive_thread_task)
 	send_thread := thread.create_and_start_with_poly_data(&endpoint, send_thread_task)
 	for !thread.is_done(receive_thread) && !thread.is_done(send_thread) {
-
+		
 	}
 }
 
@@ -71,7 +71,7 @@ init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 /* Receiving Datagrams */
 
 Recvmsg_Ctx :: struct {
-	name:    [110]u8, // should
+	name:    [size_of(Sock_Addr_Any)]u8, // should
 	buf:    [MAX_DGRAM_SIZE]byte,
 	sock:    net.UDP_Socket,
 	io:      nbio.IO,
@@ -99,12 +99,12 @@ receive_thread_task :: proc(endpoint: ^net.Endpoint) {
 
 	if err = net.bind(ctx.sock, endpoint^); err != nil {
 		net.close(ctx.sock)
-		return
 	}
-
 	fmt.assertf(err == nil, "Error opening socket: %v", err)
+
 	io_err: os.Errno
 
+	fmt.println("Now receiving packets on port %v", endpoint.port)
 	nbio.recvmsg(&ctx.io, ctx.sock, ctx.name[:], [][]u8{ctx.buf[:]}, rawptr(&ctx), on_recvmsg)
 
 	for go := Global_Context.thread_state;
@@ -131,18 +131,17 @@ on_recvmsg :: proc(
 	ctx := (^Recvmsg_Ctx)(ctx_ptr)
 	//peer := _wrap_os_addr(sockaddr)
 	peer_sock := transmute(Sock_Addr_Any)ctx.name
-	parse_ok := false
+	peer := unwrap_sock_addr(peer_sock)
+	//fmt.println("Peer: ", peer)
 
-	fmt.println("buf_len: ", len(ctx.buf))
-
-	if err == nil && parse_ok {
+	if err == nil{
 		// FIXME: handle_datagram expects a regular slice instead of
 		// io_vecs so we only have a single buffer right now
-		//handle_datagram(ctx.io_vecs[0][:received], peer)
+		handle_datagram(ctx.buf[:received], peer)
 	} else {
 		if err != nil do fmt.printfln("Error receiving from client: %v", err)
-		if !parse_ok do fmt.printfln("Error reading peer path: %v, %v", peer_sock.family, peer_sock.port)
-		fmt.printfln("received message: %v", ctx.buf[:max(received, 1)])
+		//if !parse_ok do fmt.printfln("Error reading peer path: %v, %v", peer_sock.family, peer_sock.port)
+		//fmt.printfln("received message: %v", ctx.buf[:max(received, 1)])
 	}
 
 	nbio.recvmsg(&ctx.io, ctx.sock,ctx.name[:], [][]u8{ctx.buf[:]}, ctx_ptr, on_recvmsg)
