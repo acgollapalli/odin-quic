@@ -9,21 +9,24 @@ import "base:runtime"
 import "core:fmt"
 
 
-read_frames :: proc(payload: []u8) -> (out: []^Frame, err: Transport_Error) {
-	payload := payload
+read_frames :: proc(buf_payload: []u8) -> (out: []^Frame, err: Transport_Error) {
+	payload := buf_payload
 
+	// FIXME: This is hard to track the lifetime of
 	frames := make([dynamic]^Frame)
-	fmt.println(len(frames))
 
+	l_init := len(payload)
 
 	for len(payload) > 0 {
 		frame := read_frame(&payload) or_return
+		fmt.println("We've read this many frames: ", len(frames))
 		#partial switch _ in frame.variant {
 		case ^Padding_Frame:
 			continue
 		case:
 			append(&frames, frame)
 		}
+		fmt.printfln("frames: %v", frames[0].variant)
 	}
 	out = frames[:]
 	return
@@ -34,47 +37,47 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 
 	switch payload[0] {
 	case 0x01:
-		frame = new(Padding_Frame)
+		frame = new_frame(Padding_Frame)
 	case 0x02:
-		frame = new(Ping_Frame)
+		frame = new_frame(Ping_Frame)
 	case 0x02 ..= 0x03:
-		frame = new(Ack_Frame)
+		frame = new_frame(Ack_Frame)
 	case 0x04:
-		frame = new(Reset_Stream_Frame)
+		frame = new_frame(Reset_Stream_Frame)
 	case 0x05:
-		frame = new(Stop_Sending_Frame)
+		frame = new_frame(Stop_Sending_Frame)
 	case 0x06:
-		frame = new(Crypto_Frame)
+		frame = new_frame(Crypto_Frame)
 	case 0x07:
-		frame = new(New_Token_Frame)
+		frame = new_frame(New_Token_Frame)
 	case 0x08 ..= 0x0f:
-		frame = new(Stream_Frame)
+		frame = new_frame(Stream_Frame)
 	case 0x10:
-		frame = new(Max_Data_Frame)
+		frame = new_frame(Max_Data_Frame)
 	case 0x11:
-		frame = new(Max_Stream_Data_Frame)
+		frame = new_frame(Max_Stream_Data_Frame)
 	case 0x12 ..= 0x13:
-		frame = new(Max_Streams_Frame)
+		frame = new_frame(Max_Streams_Frame)
 	case 0x14:
-		frame = new(Data_Blocked_Frame)
+		frame = new_frame(Data_Blocked_Frame)
 	case 0x15:
-		frame = new(Stream_Data_Blocked_Frame)
+		frame = new_frame(Stream_Data_Blocked_Frame)
 	case 0x16 ..= 0x17:
-		frame = new(Streams_Blocked_Frame)
+		frame = new_frame(Streams_Blocked_Frame)
 	case 0x18:
-		frame = new(New_Connection_Id_Frame)
+		frame = new_frame(New_Connection_Id_Frame)
 	case 0x19:
-		frame = new(Retire_Connection_Id_Frame)
+		frame = new_frame(Retire_Connection_Id_Frame)
 	case 0x1a:
-		frame = new(Path_Challenge_Frame)
+		frame = new_frame(Path_Challenge_Frame)
 	case 0x1b:
-		frame = new(Path_Response_Frame)
+		frame = new_frame(Path_Response_Frame)
 	case 0x1c ..= 0x1d:
-		frame = new(Connection_Close_Frame)
+		frame = new_frame(Connection_Close_Frame)
 	case 0x1e:
-		frame = new(Handshake_Done_Frame)
+		frame = new_frame(Handshake_Done_Frame)
 	case 0x30 ..= 0x31:
-		frame = new(Datagram_Frame)
+		frame = new_frame(Datagram_Frame)
 	}
 
 	err := _read_frame(frame, payload)
@@ -83,6 +86,7 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 }
 
 _read_frame :: proc(frame: ^Frame, payload: ^[]u8) -> Transport_Error {
+	fmt.println(frame.variant)
 	switch f in frame.variant {
 	case ^Padding_Frame:
 		return read_padding(f, payload)
@@ -476,7 +480,7 @@ read_datagram :: proc(
 read_variable_length_int :: proc(payload: ^[]u8) -> (u64, Transport_Error) {
 	if len(payload) == 0 do return 0, .PROTOCOL_VIOLATION
 	two_msb := payload[0] >> 6
-	n := u64(payload[0]) &~ (2 << 6)
+	n := u64(payload[0]) &~ 0xc0
 
 	num_len: int
 	switch two_msb {
@@ -489,6 +493,9 @@ read_variable_length_int :: proc(payload: ^[]u8) -> (u64, Transport_Error) {
 	case 0x03:
 		num_len = 8
 	}
+
+	fmt.printfln("num_len %v", num_len)
+	fmt.printfln("bytes %x", payload[:num_len])
 
 	if len(payload) < num_len do return 0, .PROTOCOL_VIOLATION
 

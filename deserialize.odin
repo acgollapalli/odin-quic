@@ -42,6 +42,7 @@ handle_datagram :: proc(initdg: []byte, peer: net.Endpoint) {
 		if conn == nil do conn, _ = find_conn(dest_conn_id)
 
 		if err != nil {
+			fmt.println("WE GOT AN ERROR")
 			handle_transport_error(conn, err)
 			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
@@ -283,9 +284,10 @@ process_initial :: proc(
 		return nil, nil, nil
 	}
 
-	fmt.println("packet_payload: %x", payload)
+	fmt.println("packet_payload: %x", payload[:len(payload) -16])
 
-	frames := read_frames(payload) or_return
+	frames := read_frames(payload[:len(payload) -16]) or_return
+	assert(false, "debugging here")
 
 	return Initial_Packet {
 			version = version,
@@ -295,7 +297,7 @@ process_initial :: proc(
 			token = token,
 			packet_payload = frames,
 		},
-		packet[payload_length:],
+	packet[int(payload_length) - pn_len:],
 		nil
 }
 
