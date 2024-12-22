@@ -21,6 +21,10 @@ package quic
 import "core:fmt"
 import "core:net"
 
+decrement_payload :: proc(payload: ^[]u8) {
+	payload^ = payload[1:]
+}
+
 main :: proc() {
 	fmt.println("Your drill is the drill that creates the heavens!")
 
@@ -49,7 +53,10 @@ main :: proc() {
 //	key := hex_decode_const("7db5df06e7a69e432496adedb0085192" +
 //							"3595221596ae2ae9fb8115c1e9ed0a44")
 //	fmt.printfln("initial_secret: %x", key)
-//	fmt.printfln("client_initial_secret: %x", tlsv13_expand_label(key, "client in", .SHA256, 32))
+	//	fmt.printfln("client_initial_secret: %x", tlsv13_expand_label(key, "client in", .SHA256, 32))
+
+	//payload := []u8{ 1, 2, 3, 4}
+	//decrement_payload(&payload)
 
 	init(.Server, callbacks)
 }

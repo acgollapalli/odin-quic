@@ -35,7 +35,7 @@ handle_datagram :: proc(initdg: []byte, peer: net.Endpoint) {
 			"Getting dest_conn_id: %v from packet",
 			get_dest_conn_id(packet),
 		)
-		fmt.println("Recieved this packet: ", packet)
+		//fmt.println("Recieved this packet: ", packet)
 
 		// establish our baselines
 		if dest_conn_id == nil do dest_conn_id = get_dest_conn_id(packet)
@@ -47,7 +47,7 @@ handle_datagram :: proc(initdg: []byte, peer: net.Endpoint) {
 			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
 		   packet != nil {
-			fmt.println("Recieved this packet: ", packet)
+			//fmt.printfln("Recieved this packet: %x", packet)
 			// TODO: This should MAYBE put the packet on thread specific queue
 			//handle_incoming_packet(conn, packet, len_dg, peer)
 		}
@@ -64,8 +64,8 @@ process_incoming_packet :: proc(
 	[]byte,
 	Transport_Error,
 ) {
-	packet := packet // let's mutate the slice as we iterate
-	full_packet := packet
+	packet := packet      // let's mutate the slice as we iterate
+	full_packet := packet // but let's also cache the origninal 
 
 	/* This is under header protection
        and we can't read the latter half of it yet
@@ -88,6 +88,7 @@ process_incoming_packet :: proc(
 		packet = packet[16:]
 	} else {
 		// get version
+		fmt.printfln("Version bytes: %v", packet[0:4])
 		for b in packet[0:4] {
 			version = (u32)(b) + (version << 8)
 		}
@@ -98,13 +99,14 @@ process_incoming_packet :: proc(
 
 		// get the length of the connection id
 		dest_conn_id_len = packet[0]
+		fmt.printfln("dest_connid:len %v", packet[0])
 		packet = packet[1:]
 
 		// for v1 of QUIC, dest_conn_ids must be < 20
 		if dest_conn_id_len > 20 && packet_type != .Version_Negotiation {
 			return nil, nil, .VERSION_NEGOTIATION_ERROR
 		} else {
-			dest_conn_id = packet[0:dest_conn_id_len]
+			dest_conn_id = packet[:dest_conn_id_len]
 			packet = packet[dest_conn_id_len:]
 
 			src_conn_id_len = packet[0]
@@ -287,7 +289,6 @@ process_initial :: proc(
 	fmt.println("packet_payload: %x", payload[:len(payload) -16])
 
 	frames := read_frames(payload[:len(payload) -16]) or_return
-	assert(false, "debugging here")
 
 	return Initial_Packet {
 			version = version,

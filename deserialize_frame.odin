@@ -19,14 +19,14 @@ read_frames :: proc(buf_payload: []u8) -> (out: []^Frame, err: Transport_Error) 
 
 	for len(payload) > 0 {
 		frame := read_frame(&payload) or_return
-		fmt.println("We've read this many frames: ", len(frames))
+		//fmt.println("We've read this many frames: ", len(frames))
 		#partial switch _ in frame.variant {
 		case ^Padding_Frame:
 			continue
 		case:
 			append(&frames, frame)
 		}
-		fmt.printfln("frames: %v", frames[0].variant)
+		//fmt.printfln("frames: %v", frames[0].variant)
 	}
 	out = frames[:]
 	return
