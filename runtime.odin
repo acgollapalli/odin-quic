@@ -18,6 +18,7 @@ import "core:mem"
 import "core:net"
 import "core:os"
 import "core:sync"
+import "core:sys/posix"
 import "core:thread"
 
 import "net:http/nbio"
@@ -58,10 +59,16 @@ init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 
 	init_quic_context(callbacks)
 
-	receive_thread := thread.create_and_start_with_poly_data(&endpoint, receive_thread_task)
-	send_thread := thread.create_and_start_with_poly_data(&endpoint, send_thread_task)
+	receive_thread := thread.create_and_start_with_poly_data(
+		&endpoint,
+		receive_thread_task,
+	)
+	send_thread := thread.create_and_start_with_poly_data(
+		&endpoint,
+		send_thread_task,
+	)
 	for !thread.is_done(receive_thread) && !thread.is_done(send_thread) {
-		
+
 	}
 }
 
@@ -71,10 +78,10 @@ init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 /* Receiving Datagrams */
 
 Recvmsg_Ctx :: struct {
-	name:    [size_of(Sock_Addr_Any)]u8, // should
-	buf:    [MAX_DGRAM_SIZE]byte,
-	sock:    net.UDP_Socket,
-	io:      nbio.IO,
+	name: [size_of(sockaddr)]u8, // should
+	buf:  [MAX_DGRAM_SIZE]byte,
+	sock: net.UDP_Socket,
+	io:   nbio.IO,
 }
 
 
@@ -105,7 +112,14 @@ receive_thread_task :: proc(endpoint: ^net.Endpoint) {
 	io_err: os.Errno
 
 	fmt.println("Now receiving packets on port %v", endpoint.port)
-	nbio.recvmsg(&ctx.io, ctx.sock, ctx.name[:], [][]u8{ctx.buf[:]}, rawptr(&ctx), on_recvmsg)
+	nbio.recvmsg(
+		&ctx.io,
+		ctx.sock,
+		ctx.name[:],
+		[][]u8{ctx.buf[:]},
+		rawptr(&ctx),
+		on_recvmsg,
+	)
 
 	for go := Global_Context.thread_state;
 	    go != .Stop && io_err == os.ERROR_NONE; {
@@ -130,11 +144,11 @@ on_recvmsg :: proc(
 ) {
 	ctx := (^Recvmsg_Ctx)(ctx_ptr)
 	//peer := _wrap_os_addr(sockaddr)
-	peer_sock := transmute(Sock_Addr_Any)ctx.name
+	peer_sock := transmute(sockaddr)ctx.name
 	peer := unwrap_sock_addr(peer_sock)
 	//fmt.println("Peer: ", peer)
 
-	if err == nil{
+	if err == nil {
 		// FIXME: handle_datagram expects a regular slice instead of
 		// io_vecs so we only have a single buffer right now
 		handle_datagram(ctx.buf[:received], peer)
@@ -144,7 +158,14 @@ on_recvmsg :: proc(
 		//fmt.printfln("received message: %v", ctx.buf[:max(received, 1)])
 	}
 
-	nbio.recvmsg(&ctx.io, ctx.sock,ctx.name[:], [][]u8{ctx.buf[:]}, ctx_ptr, on_recvmsg)
+	nbio.recvmsg(
+		&ctx.io,
+		ctx.sock,
+		ctx.name[:],
+		[][]u8{ctx.buf[:]},
+		ctx_ptr,
+		on_recvmsg,
+	)
 }
 
 /* Sending Datagrams */
