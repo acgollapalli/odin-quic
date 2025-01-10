@@ -26,28 +26,19 @@ handle_datagram :: proc(initdg: []byte, peer: net.Endpoint) {
 	len_dg := len(initdg)
 
 	for dg := initdg; len(dg) > 0; {
-		fmt.println("Len dg", len(dg))
-		//fmt.println("current dg:", dg)
 		packet, remaining_dg, err := process_incoming_packet(dg) // FIXME: pass conn here
 		dg = remaining_dg
-
-		fmt.printfln(
-			"Getting dest_conn_id: %v from packet",
-			get_dest_conn_id(packet),
-		)
-		//fmt.println("Recieved this packet: ", packet)
 
 		// establish our baselines
 		if dest_conn_id == nil do dest_conn_id = get_dest_conn_id(packet)
 		if conn == nil do conn, _ = find_conn(dest_conn_id)
 
 		if err != nil {
-			fmt.println("WE GOT AN ERROR")
+			fmt.printfln("Error handling packet: %v", err)
 			handle_transport_error(conn, err)
 			return
 		} else if string(dest_conn_id) == string(get_dest_conn_id(packet)) &&
 		   packet != nil {
-			//fmt.printfln("Recieved this packet: %x", packet)
 			// TODO: This should MAYBE put the packet on thread specific queue
 			//handle_incoming_packet(conn, packet, len_dg, peer)
 		}
@@ -88,7 +79,6 @@ process_incoming_packet :: proc(
 		packet = packet[16:]
 	} else {
 		// get version
-		fmt.printfln("Version bytes: %v", packet[0:4])
 		for b in packet[0:4] {
 			version = (u32)(b) + (version << 8)
 		}
@@ -99,7 +89,6 @@ process_incoming_packet :: proc(
 
 		// get the length of the connection id
 		dest_conn_id_len = packet[0]
-		fmt.printfln("dest_connid:len %v", packet[0])
 		packet = packet[1:]
 
 		// for v1 of QUIC, dest_conn_ids must be < 20
@@ -121,14 +110,6 @@ process_incoming_packet :: proc(
 		}
 	}
 
-	//fmt.printfln("We've received a packet type of %v, of version %v, with dest_conn_id: %v, and src_conn_id: %v", packet_type, version, dest_conn_id, src_conn_id)
-
-	/*
-     * We've about reached the point where we can read anything that's unprotected
-     * and common to all the packet types. The way we decrypt packet types is unique
-     * to each packet type, so we've got handlers for each one.
-     */
-
 	partial_packet := Partial_Packet {
 		first_byte   = first_byte,
 		version      = version,
@@ -140,7 +121,7 @@ process_incoming_packet :: proc(
 	case .Initial:
 		return process_initial(partial_packet, full_packet, packet)
 	case .Handshake:
-		return process_handshake(partial_packet, packet)
+		return process_handshake(partial_packet, full_packet, packet)
 	case .Retry:
 		return process_retry(partial_packet, packet)
 	case .Version_Negotiation:
@@ -177,7 +158,6 @@ get_variable_length_int :: proc(packet: []byte) -> (n: u64, len: int) {
 		n = u64(packet[i]) + (n << 8)
 	}
 
-	//	fmt.printfln("variable length int %v from bytes:%v",n, packet[0:len])
 	return
 }
 
@@ -234,11 +214,9 @@ process_initial :: proc(
 		// it's based off the dest id, so do we NEED TO? maybe
 		// it should be handled by the frame handler, not down here)
 
-		//fmt.println("received initial packet with no associated conn")
 		secrets = determine_initial_secret(dest_conn_id)
 	}
 	hp_key = secrets[.Read].hp
-	//fmt.printfln("header protection key: %x", hp_key)
 
 	// FIXME: Should we be decrypting packet protection here?
 	token_length, tk_offset := get_variable_length_int(packet)
@@ -251,13 +229,11 @@ process_initial :: proc(
 	packet = packet[pl_offset:] // FIXME: Maybe the function can do this part?
 
 
-	//fmt.println("getting header mask: ")
 	mask := get_header_mask(
 		hp_key,
 		packet[4:20],
 		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
 	)
-	//fmt.println("header mask: ", mask)
 	packet_number: u32
 	pn_len: int
 	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
@@ -266,10 +242,6 @@ process_initial :: proc(
 		mask,
 		true
 	)
-
-	//fmt.println("packet_number: ", packet_number)
-	//fmt.println("packet: ", packet)
-	//fmt.println("payload_len:", payload_length, len(packet))
 
 	// NOTE: header_length (for assocated data for decryption) includes the
 	// length of the packet number. However, the payload length field in the
@@ -285,8 +257,6 @@ process_initial :: proc(
 		// decrypt it
 		return nil, nil, nil
 	}
-
-	fmt.println("packet_payload: %x", payload[:len(payload) -16])
 
 	frames := read_frames(payload[:len(payload) -16]) or_return
 
@@ -304,6 +274,7 @@ process_initial :: proc(
 
 process_handshake :: proc(
 	using partial: Partial_Packet,
+	full_packet: []u8,
 	packet: []u8,
 ) -> (
 	pktObj: Packet,
@@ -312,39 +283,50 @@ process_handshake :: proc(
 ) {
 	packet := packet
 
-	// getting the mask
 	conn, conn_ok := find_conn(dest_conn_id)
-	if !conn_ok { 	// FIXME: REPLACE WITH ZII
-		assert(
-			conn.encryption.secrets[.Handshake_Encryption][.Read].valid,
-			"Dropped handshake packet",
-		)
-		return nil, nil, .PROTOCOL_VIOLATION // we SHOULD have keys by this point
-	}
+
+	// FIXME: we MIGHT want to just buffer here
+	// BUT, it's very rare that we wouldn't have
+	// keys here I think.
+	// We'll know when we hit integration testing.
+	if !conn_ok do return // just drop the packet
+	
+	secrets := conn.encryption.secrets[.Handshake_Encryption]
+
+	payload_length, offset := get_variable_length_int(packet)
+	packet = packet[offset:]
+
+	// we're at the packet number nowf
+	// and we sample four bytes past that.
 	mask, mask_ok := get_header_mask(
 		packet[4:20],
 		conn,
 		ssl.QUIC_Encryption_Level.Handshake_Encryption,
 		Secret_Role.Read,
 	)
-	if !mask_ok {
-		return
-	} // can't decrypt. We might not have keys yet. 
-
-
-	// FIXME: Remove packet protection HERE
-	// FIXME: Should we be decrypting packet protection here?
-	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:]
+	if !mask_ok do return // can't decrypt. We might not have keys yet.
 
 	packet_number: u32
-	_, packet_number, packet = remove_header_protection(first_byte, packet, mask)
+	pn_len: int
+	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+		first_byte,
+		packet,
+		mask,
+		true
+	)
 
+	payload := packet[:int(payload_length) - pn_len]
+	header_length := len(full_packet) + pn_len - int(payload_length)
+	header := full_packet[:header_length]
 
-	packet_payload := packet[:payload_length]
-	packet = packet[payload_length:]
+	// decrypt in place
+	if !decrypt_payload(payload, header, u64(packet_number), secrets) do return
+	payload = payload[:len(payload) -16] // ignore integrity tag 
 
-	frames := read_frames(packet_payload) or_return
+	frames := read_frames(payload) or_return
+	packet = packet[int(payload_length) - pn_len :]
+	fmt.printfln("LEN FRAMES: %d", len(frames))
+
 	return Handshake_Packet {
 			version = version,
 			dest_conn_id = dest_conn_id,

@@ -10,6 +10,7 @@ import "core:encoding/uuid"
 import "core:net"
 import "core:sync"
 import "core:time"
+import "core:mem"
 
 Connection_Id :: []u8
 
@@ -64,6 +65,7 @@ Connection_Params :: struct {
 	version_information:                 Supported_Version,
 	max_datagram_frame_size:             u64,
 	grease_quic_bit:                     bool,
+
 }
 
 /*
@@ -130,6 +132,7 @@ Conn :: struct {
 	acks:                          Ack_State,
 	send:                          Send_State,
 	endpoint:                      net.Endpoint,
+	arena:                         mem.Dynamic_Arena,
 }
 
 Send_State :: [Packet_Number_Space]struct {

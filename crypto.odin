@@ -19,7 +19,8 @@ import "net:ssl"
 import libressl "net:ssl/bindings"
 
 hex_decode_const :: proc(str: string) -> []u8 {
-	out, err := hex.decode(raw_data(str)[:len(str)])
+	out, ok := hex.decode(raw_data(str)[:len(str)])
+	assert(ok, "Error decoding salts!")
 	return out
 }
 
@@ -177,6 +178,7 @@ get_header_mask_proper :: proc(
 	case .AEAD_CHACHA20_POLY1305:
 		mask = chacha_header_mask(hp_key, sample)
 	}
+
 	return mask
 }
 
@@ -212,12 +214,9 @@ has_valid_secret :: proc(
 aes_ecb_header_mask :: proc(hp_key: []byte, sample: []byte) -> []byte {
 	ctx: aes.Context_ECB
 	defer (aes.reset_ecb(&ctx))
-	//fmt.println("initializing initial secret context, w/ key_len:", len(hp_key))
-	//fmt.printfln("sample: %x", sample)
 	aes.init_ecb(&ctx, hp_key)
 	dst := make([]byte, 16) // FIXME: maybe a temp allocator here?
 	aes.encrypt_ecb(&ctx, dst, sample) // Simple XOR of the same value that is 
-	//fmt.printfln("got header mask: %x", dst)
 	return dst[0:5]
 }
 
@@ -251,7 +250,6 @@ remove_header_protection_deprecated :: proc(
 	first_byte := first_byte
 	packet := packet
 
-	//fmt.printfln("first byte %x", first_byte)
 	// remove the proection on the first byte
 	if (first_byte & 0x80) == 0x80 {
 		// long header
@@ -260,10 +258,8 @@ remove_header_protection_deprecated :: proc(
 		// short header
 		first_byte = first_byte ~ (mask[0] & 0x1f)
 	}
-	//fmt.printfln("decrypted first byte %x", first_byte)
 
 	packet_number_length := first_byte & 0x03 + 1 // will index off this?
-	//fmt.println("packet number length", packet_number_length)
 
 	packet_number_bytes := packet[:packet_number_length]
 	packet = packet[packet_number_length:]
@@ -293,7 +289,6 @@ remove_header_protection_with_pn_len :: proc(
 	first_byte := first_byte
 	packet := packet
 
-	//fmt.printfln("first byte %x", first_byte)
 	// remove the proection on the first byte
 	if (first_byte & 0x80) == 0x80 {
 		// long header
@@ -302,10 +297,8 @@ remove_header_protection_with_pn_len :: proc(
 		// short header
 		first_byte = first_byte ~ (mask[0] & 0x1f)
 	}
-	//fmt.printfln("decrypted first byte %x", first_byte)
 
 	packet_number_length := first_byte & 0x03 + 1 // will index off this?
-	//fmt.println("packet number length", packet_number_length)
 
 	packet_number_bytes := packet[:packet_number_length]
 	packet = packet[packet_number_length:]
@@ -412,8 +405,6 @@ tlsv13_expand_label :: proc(
 	for b, i in label {
 		hkdf_label[i + len(prefix) + 3] = u8(b)
 	}
-	//fmt.printfln("hkdf-label: %x", hkdf_label)
-	//fmt.println("len label: ", len(hkdf_label))
 
 	hkdf.expand(algo, key, hkdf_label[:], out)
 	return out
@@ -448,9 +439,7 @@ determine_initial_secret :: proc(
 	// only connections in the server role ever call this function
 	// so we know that .Read is the client secret
 	secret[.Read].key = client_key
-	//fmt.printfln("client_key %x", client_key)
 	secret[.Read].hp = client_hp
-	//fmt.printfln("client_hp_key %x", client_hp)
 	secret[.Read].iv = client_iv
 	secret[.Read].valid = true // maybe need to deprecate
 	secret[.Read].cipher = .AEAD_AES_128_GCM // always this for initial
@@ -595,12 +584,12 @@ decrypt_payload_with_conn :: proc() {
 // helper function to get the nonce
 get_nonce :: proc(iv: []u8, packet_number: u64, out: []u8) {
 	for i: u8 = 0; i < 8; i += 1 {
-		out[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) // nonce is padded w/ zeroes 
+		// nonce is padded w/ zeroes 
+		out[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) 
 	}
 	for &b, i in out {
 		b ~= iv[i] // bitwise xor with iv
 	}
-	//fmt.printfln("Using nonce: %x", out)
 	return
 }
 
@@ -615,10 +604,8 @@ decrypt_payload_with_secrets :: proc(
 	s := secrets[.Read]
 	nonce := make([]u8, len(s.iv)) // FIXME: Maybe use temp allocator here
 	defer delete(nonce)
-	//fmt.printfln("decryption key: %x", s.key)
+
 	get_nonce(s.iv, packet_number, nonce)
-	//fmt.printfln("nonce: %x", nonce)
-	//fmt.printfln("header: %x", header)
 
 	switch s.cipher {
 	case .AEAD_AES_128_GCM, .AEAD_AES_256_GCM:
@@ -702,6 +689,20 @@ send_alert :: proc "c" (
 	return 1
 }
 
+set_secret :: proc ( conn: ^Conn, level: ssl.QUIC_Encryption_Level, role: Secret_Role, cipher: Packet_Protection_Algorithm, secret: []u8) {
+	e := &conn.encryption.secrets[level][.Read]
+	key_len := Key_Len[e.cipher]
+	algo := Hash_Algo[e.cipher]
+
+	sync.guard(&conn.encryption.lock)
+	e.key = tlsv13_expand_label(secret, "quic key", algo, key_len)
+	e.iv = tlsv13_expand_label(secret, "quic iv", algo, 12)
+	e.hp = tlsv13_expand_label(secret, "quic hp", algo, key_len)
+	e.ku = tlsv13_expand_label(secret, "quic ku", algo, key_len)
+	e.cipher = cipher
+	e.valid = true
+}
+
 set_read_secret :: proc "c" (
 	ssl_conn: ssl.SSL_Connection,
 	level: libressl.ssl_encryption_level_t,
@@ -710,26 +711,12 @@ set_read_secret :: proc "c" (
 	slen: uint,
 ) -> i32 {
 	context = runtime.default_context()
-	conn, _ := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
-	l := transmute(ssl.QUIC_Encryption_Level)level
+	conn, _ := find_conn(ssl_conn)
+	level := transmute(ssl.QUIC_Encryption_Level)level
+	cipher := get_cipher(cipher)
 
-	e := conn.encryption.secrets[l][.Read]
-	if !e.valid {
-		e = TLS_Secret {
-			cipher = get_cipher(cipher),
-		}
-		conn.encryption.secrets[l][.Read] = e
-	}
-
-	key_len := Key_Len[e.cipher]
-	algo := Hash_Algo[e.cipher]
-
-	sync.guard(&conn.encryption.lock)
-	e.key = tlsv13_expand_label(secret[:slen], "quic key", algo, key_len)
-	e.iv = tlsv13_expand_label(secret[:slen], "quic iv", algo, 12)
-	e.hp = tlsv13_expand_label(secret[:slen], "quic hp", algo, key_len)
-	e.ku = tlsv13_expand_label(secret[:slen], "quic ku", algo, key_len)
-	e.valid = true
+	set_secret(conn, level, .Read, cipher, secret[:slen])
+	
 	return 1
 }
 
@@ -742,24 +729,11 @@ set_write_secret :: proc "c" (
 ) -> i32 {
 	context = runtime.default_context()
 	conn, _ := find_conn(ssl_conn) // TODO: make SSL init fn w/ a ptr to conn
-	l := transmute(ssl.QUIC_Encryption_Level)level
-	e := conn.encryption.secrets[l][.Write]
-	if !e.valid {
-		e = TLS_Secret {
-			cipher = get_cipher(cipher),
-		}
-		conn.encryption.secrets[l][.Write] = e
-	}
+	level := transmute(ssl.QUIC_Encryption_Level)level
+	cipher := get_cipher(cipher)
 
-	key_len := Key_Len[e.cipher]
-	algo := Hash_Algo[e.cipher]
+	set_secret(conn, level, .Write, cipher, secret[:slen])
 
-	sync.guard(&conn.encryption.lock)
-	e.key = tlsv13_expand_label(secret[:slen], "quic key", algo, key_len)
-	e.iv = tlsv13_expand_label(secret[:slen], "quic iv", algo, 12)
-	e.hp = tlsv13_expand_label(secret[:slen], "quic hp", algo, key_len)
-	e.ku = tlsv13_expand_label(secret[:slen], "quic ku", algo, key_len)
-	e.valid = true
 	return 1
 }
 

@@ -494,9 +494,6 @@ read_variable_length_int :: proc(payload: ^[]u8) -> (u64, Transport_Error) {
 		num_len = 8
 	}
 
-	fmt.printfln("num_len %v", num_len)
-	fmt.printfln("bytes %x", payload[:num_len])
-
 	if len(payload) < num_len do return 0, .PROTOCOL_VIOLATION
 
 	for i := 1; i < num_len; i += 1 {

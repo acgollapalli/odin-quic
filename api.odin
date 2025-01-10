@@ -103,7 +103,7 @@ Datagram_Frame_Callback :: #type proc(
 */
 Callbacks :: struct {
 	connect_callback:        Maybe(Connect_Callback),
-	stream_callback:         Stream_Callback,
+	stream_callback:         Maybe(Stream_Callback),
 	datagram_frame_callback: Maybe(Datagram_Frame_Callback),
 }
 

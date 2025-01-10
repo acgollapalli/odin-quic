@@ -103,7 +103,8 @@ handle_new_state :: proc(
 		if conn, ok := conn.?; ok {
 			c = conn
 		} else if len_dg >= 1200 {
-			c = create_conn(p, peer)
+			secrets := determine_initial_secret(p.dest_conn_id)
+			c = create_conn(secrets, peer)
 		}
 		ack_eliciting, err := handle_initial(c, p, peer)
 		if err != nil {

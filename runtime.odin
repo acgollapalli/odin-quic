@@ -51,13 +51,27 @@ init_with_client_defaults :: proc(alloc := context.allocator) {
 	context.allocator = alloc
 }
 
-init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
+default_config :: Conn_Config {
+	send_limit    = 1 << 8, // number of bytes allowed through
+	receive_limit = 1 << 8, // number of bytes allowed through
+	version       = .QUICv1,
+	role          = .Server,
+	flow_enabled  = true,
+	spin_enabled  = true, // enables latency tracking in 1-rtt streams
+}
+
+init_runtime :: proc(
+	callbacks: Callbacks,
+	address := ADDRESS,
+	port := PORT,
+	config := default_config,
+) {
 	address := net.parse_address(ADDRESS)
 	fmt.assertf(address != nil, "Error parsing connection params: %v", ADDRESS)
 
 	endpoint := net.Endpoint{address, PORT}
 
-	init_quic_context(callbacks)
+	init_quic_context(callbacks, default_config)
 
 	receive_thread := thread.create_and_start_with_poly_data(
 		&endpoint,
