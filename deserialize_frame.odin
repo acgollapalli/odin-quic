@@ -78,6 +78,8 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 		frame = new_frame(Handshake_Done_Frame)
 	case 0x30 ..= 0x31:
 		frame = new_frame(Datagram_Frame)
+	case:
+		return nil, .FRAME_ENCODING_ERROR
 	}
 
 	err := _read_frame(frame, payload)
