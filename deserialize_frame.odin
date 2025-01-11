@@ -36,9 +36,9 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 	frame: ^Frame
 
 	switch payload[0] {
-	case 0x01:
+	case 0x00:
 		frame = new_frame(Padding_Frame)
-	case 0x02:
+	case 0x01:
 		frame = new_frame(Ping_Frame)
 	case 0x02 ..= 0x03:
 		frame = new_frame(Ack_Frame)
@@ -88,7 +88,6 @@ read_frame :: proc(payload: ^[]u8) -> (^Frame, Transport_Error) {
 }
 
 _read_frame :: proc(frame: ^Frame, payload: ^[]u8) -> Transport_Error {
-	fmt.println(frame.variant)
 	switch f in frame.variant {
 	case ^Padding_Frame:
 		return read_padding(f, payload)

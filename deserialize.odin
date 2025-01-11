@@ -11,6 +11,8 @@ import "core:fmt"
 import "core:net"
 import "core:sync"
 
+DEST_CONN_ID_LEN :: 5 when ODIN_TEST else 16
+
 Partial_Packet :: struct {
 	first_byte:   byte,
 	version:      u32,
@@ -74,9 +76,8 @@ process_incoming_packet :: proc(
 	if packet_type == .One_RTT {
 		// we always return conn_ids as uuids
 		// uuid's are encoded in 16 bytes
-		dest_conn_id_len = 16
-		dest_conn_id = packet[0:16]
-		packet = packet[16:]
+		dest_conn_id = packet[0:DEST_CONN_ID_LEN]
+		packet = packet[DEST_CONN_ID_LEN:]
 	} else {
 		// get version
 		for b in packet[0:4] {
@@ -129,7 +130,7 @@ process_incoming_packet :: proc(
 	case .Zero_RTT:
 		return process_zero_rtt(partial_packet, packet)
 	case .One_RTT:
-		return process_one_rtt(partial_packet, packet)
+		return process_one_rtt(partial_packet, full_packet, packet)
 	}
 
 	return nil, nil, nil
@@ -325,7 +326,6 @@ process_handshake :: proc(
 
 	frames := read_frames(payload) or_return
 	packet = packet[int(payload_length) - pn_len :]
-	fmt.printfln("LEN FRAMES: %d", len(frames))
 
 	return Handshake_Packet {
 			version = version,
@@ -446,7 +446,8 @@ process_zero_rtt :: proc(
 }
 
 process_one_rtt :: proc(
-	partial: Partial_Packet,
+	using partial: Partial_Packet,
+	full_packet: []u8,
 	packet: []u8,
 ) -> (
 	pkt: Packet,
@@ -454,17 +455,19 @@ process_one_rtt :: proc(
 	err: Transport_Error,
 ) {
 	packet := packet
-	dest_conn_id := partial.dest_conn_id // can't shadow variables with using
-	first_byte := partial.first_byte
 
-	// getting the mask
-	mask: []byte
-	mask_ok: bool
-	conn, conn_ok := find_conn(dest_conn_id)
-	if !conn_ok { 	// FIXME: REPLACE WITH ZII
-		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object
-	}
-	mask, mask_ok = get_header_mask(
+	conn, conn_ok := conn_find(dest_conn_id)
+
+	// FIXME: we MIGHT want to just buffer here
+	// BUT, it's very rare that we wouldn't have
+	// keys here I think.
+	// We'll know when we hit integration testing.
+	if !conn_ok do return // just drop the packet
+	
+	secrets := conn.encryption.secrets[.Application_Encryption]
+
+
+	mask, mask_ok := get_header_mask(
 		packet[4:20],
 		conn,
 		ssl.QUIC_Encryption_Level.Application_Encryption,
@@ -473,18 +476,26 @@ process_one_rtt :: proc(
 	if !mask_ok do return
 
 	// removing packet protection
-	decrypted_first_byte: byte
 	packet_number: u32
-	decrypted_first_byte, packet_number, packet = remove_header_protection(
+	pn_len: int
+	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
 		first_byte,
 		packet,
 		mask,
+		true
 	)
+
+	header_length := len(full_packet) - len(packet)
+	header := full_packet[:header_length]
+	decrypted_first_byte := header[0]
 
 	spin_bit := (decrypted_first_byte & (1 << 5)) != 0
 	key_phase := (decrypted_first_byte & (1 << 2)) != 0
 
-	frames := read_frames(packet) or_return
+	if !decrypt_payload(packet, header, u64(packet_number), secrets) do return
+	payload := packet[:len(packet) -16] // ignore integrity tag
+
+	frames := read_frames(payload) or_return
 
 	return One_RTT_Packet {
 			spin_bit = spin_bit,

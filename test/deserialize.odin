@@ -31,7 +31,6 @@ expect_array_match :: proc(t: ^testing.T, src, expected: []$T, $name: string) {
 		match &&= src[i] == expected[i]
 	}
 	testing.expectf(t, match, name + " does not match. %v vs %v", src, expected)
-
 }
 
 
@@ -379,5 +378,78 @@ test_handshake_packet :: proc(t: ^testing.T) {
 		pkt_crypto_frame.crypto_data,
 		"crypto_data",
 	)
+}
 
+@(test)
+test_application_packet :: proc(t: ^testing.T) {
+	quic.init_quic_context({}, {send_limit = 2, role = .Client})
+	secrets: [quic.Secret_Role]quic.TLS_Secret
+	conn := quic.conn_create(secrets, net.Endpoint{})
+	level := ssl.QUIC_Encryption_Level.Application_Encryption
+
+	// UDP datagram 6 from https://quic.xargs.org/#server-application-packet/annotated
+	// odinfmt:disable
+	packet_data  := []u8{
+		0x49, 0x63, 0x5f, 0x63, 0x69, 0x64, 0xcd, 0x9a, 0x64, 0x12, 0x40, 0x57,
+		0xc8, 0x83, 0xe9, 0x4d, 0x9c, 0x29, 0x6b, 0xaa, 0x8c, 0xa0, 0xea, 0x6e,
+		0x3a, 0x21, 0xfa, 0xaf, 0x99, 0xaf, 0x2f, 0xe1, 0x03, 0x21, 0x69, 0x20,
+		0x57, 0xd2,
+	}
+	// odinfmt:enable
+	dest_conn_id := []u8{0x63, 0x5f, 0x63, 0x69, 0x64, }
+
+	// expected frames include this ack frame, a handshake done frame
+	// and the following stream frame
+	ack_frame := quic.Ack_Frame{
+		largest_ack = 0,
+		ack_delay = 12,
+		first_ack_range = 0,
+	}
+	stream_frame := quic.Stream_Frame{
+		has_offset = true,
+		has_len = true,
+		fin_bit = true,
+		stream_id = 0,
+		offset = 0,
+		stream_data = { 0x70, 0x6f, 0x6e, 0x67 }
+	}
+
+	// stolen from set_secret because the validation data from
+	// https://quic.xargs.org/#server-handshake-packet does not include
+	// the secret for this example
+	e := &conn.encryption.secrets[level][.Read]
+	key_len := quic.Key_Len[e.cipher]
+	algo := quic.Hash_Algo[e.cipher]
+	{
+		sync.guard(&conn.encryption.lock)
+		e.key = quic.hex_decode_const("fd8c7da9de1b2da4d2ef9fd5188922d0")
+		e.iv = quic.hex_decode_const("02f6180e4f4aa456d7e8a602")
+		e.hp = quic.hex_decode_const("b7f6f021453e52b58940e4bba72a35d4")
+		e.cipher = quic.Packet_Protection_Algorithm.AEAD_AES_128_GCM
+		e.valid = true
+	}
+	quic.conn_save_issued_dest_conn_id(conn, dest_conn_id)
+
+	untyped_packet_st, remaining_data, pkt_err := quic.process_incoming_packet(
+		packet_data,
+	)
+	testing.expectf(t, pkt_err == nil, "packet had error: %v", pkt_err)
+
+	pkt_app, pkt_ok := untyped_packet_st.(quic.One_RTT_Packet)
+	testing.expectf(t, pkt_ok, "packet was not application packet %v", untyped_packet_st)
+
+	pkt_ack_frame, ack_ok := pkt_app.packet_payload[0].variant.(^quic.Ack_Frame)
+	pkt_handshake_done_frame, handshake_done_ok := pkt_app.packet_payload[1].variant.(^quic.Handshake_Done_Frame)
+	pkt_stream_frame, stream_ok := pkt_app.packet_payload[2].variant.(^quic.Stream_Frame)
+
+	testing.expectf(t, ack_ok, "first frame was not an ack frame %v" )
+	testing.expectf(t, pkt_ack_frame.ack_delay == 0x12, "bad read of ack frame")
+
+	testing.expectf(t, handshake_done_ok, "second frame was not an handshake_done frame")
+
+	testing.expectf(t, stream_ok, "stream frame was not an stream frame")
+	testing.expectf(t, pkt_stream_frame.has_offset, "bad value has_offset")
+	testing.expectf(t, pkt_stream_frame.has_len, "bad value has_len")
+	testing.expectf(t, pkt_stream_frame.fin_bit, "bad value fin_bit")
+	expect_array_match(t, stream_frame.stream_data, pkt_stream_frame.stream_data, "stream_data not equal")
 }
