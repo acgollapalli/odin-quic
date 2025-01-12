@@ -128,7 +128,7 @@ process_incoming_packet :: proc(
 	case .Version_Negotiation:
 		return process_version_negotiation(partial_packet, packet)
 	case .Zero_RTT:
-		return process_zero_rtt(partial_packet, packet)
+		return process_zero_rtt(partial_packet, full_packet, packet)
 	case .One_RTT:
 		return process_one_rtt(partial_packet, full_packet, packet)
 	}
@@ -230,7 +230,7 @@ process_initial :: proc(
 	packet = packet[pl_offset:] // FIXME: Maybe the function can do this part?
 
 
-	mask := get_header_mask(
+	mask := _get_header_mask(
 		hp_key,
 		packet[4:20],
 		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
@@ -396,6 +396,7 @@ process_version_negotiation :: proc(
 
 process_zero_rtt :: proc(
 	using partial: Partial_Packet,
+	full_packet: []u8,
 	packet: []u8,
 ) -> (
 	pkt: Packet,
@@ -406,33 +407,42 @@ process_zero_rtt :: proc(
 
 	// getting the mask
 	conn, conn_ok := find_conn(dest_conn_id)
-	if !conn_ok {
-		assert(
-			conn.encryption.secrets[.Handshake_Encryption][.Read].valid,
-			"Could not find conn. for Zero-RTT packet",
-		)
-		return nil, nil, .PROTOCOL_VIOLATION // We can't find the conn object for the handshake so... nah
-	}
+	// TODO: we COULD buffer here 
+	if !conn_ok do return // just drop the packet
+
+	secrets := conn.encryption.secrets[.Handshake_Encryption]
+
+	payload_length, offset := get_variable_length_int(packet)
+	packet = packet[offset:] // FIXME: Maybe the function can do this part?
+
 	mask, mask_ok := get_header_mask(
 		packet[4:20],
 		conn,
 		ssl.QUIC_Encryption_Level.Early_Data_Encryption,
 		Secret_Role.Read,
 	)
-	if !mask_ok {
-		return
-	}
-
-	payload_length, offset := get_variable_length_int(packet)
-	packet = packet[offset:] // FIXME: Maybe the function can do this part?
+	if !mask_ok do return
 
 	packet_number: u32
-	_, packet_number, packet = remove_header_protection(first_byte, packet, mask)
+	pn_len: int
+	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+		first_byte,
+		packet,
+		mask,
+		true
+	)
 
-	packet_payload := packet[:payload_length]
-	packet = packet[payload_length:]
 
-	frames := read_frames(packet_payload) or_return
+	payload := packet[:int(payload_length) - pn_len]
+	header_length := len(full_packet) + pn_len - int(payload_length)
+	header := full_packet[:header_length]
+
+		// decrypt in place
+	if !decrypt_payload(payload, header, u64(packet_number), secrets) do return
+	payload = payload[:len(payload) -16] // ignore integrity tag 
+
+	frames := read_frames(payload) or_return
+	packet = packet[int(payload_length) - pn_len :]
 
 	return Zero_RTT_Packet {
 			version = version,
@@ -465,7 +475,6 @@ process_one_rtt :: proc(
 	if !conn_ok do return // just drop the packet
 	
 	secrets := conn.encryption.secrets[.Application_Encryption]
-
 
 	mask, mask_ok := get_header_mask(
 		packet[4:20],

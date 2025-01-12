@@ -154,18 +154,8 @@ get_secret_iv_and_algo :: proc(
 
 // header protection
 
-/*
- * Gets a 16 byte sample of the payload from a
- * protected packet. Returns a mask to decrypt
- * header protection
- * Takes a specific algorithm for encryption
- */
-get_header_mask :: proc {
-	get_header_mask_proper,
-	get_header_mask_w_conn,
-}
 
-get_header_mask_proper :: proc(
+_get_header_mask :: proc(
 	hp_key, sample: []u8,
 	algo: Packet_Protection_Algorithm,
 ) -> []byte {
@@ -182,7 +172,13 @@ get_header_mask_proper :: proc(
 	return mask
 }
 
-get_header_mask_w_conn :: proc(
+/*
+ * Gets a 16 byte sample of the payload from a
+ * protected packet. Returns a mask to decrypt
+ * header protection
+ * Takes a specific algorithm for encryption
+ */
+get_header_mask:: proc(
 	sample: []u8,
 	conn: ^Conn,
 	encryption_level: ssl.QUIC_Encryption_Level,
@@ -193,7 +189,7 @@ get_header_mask_w_conn :: proc(
 ) {
 	has_valid_secret(conn, encryption_level, role) or_return
 	hp_key, algo := get_hp_key_and_algo(conn, encryption_level, role)
-	return get_header_mask_proper(hp_key, sample, algo), true
+	return _get_header_mask(hp_key, sample, algo), true
 }
 
 has_valid_secret :: proc(
@@ -489,9 +485,8 @@ protect_payload :: proc(
 	packet: Packet,
 	header: []u8,
 	payload: []u8,
-) -> (
-	[]u8,
-	[]u8,
+	cipher_text: []u8,
+	tag: []u8,
 ) {
 
 	// helper function to get the nonce
@@ -541,18 +536,10 @@ protect_payload :: proc(
 	case Retry_Packet:
 		key = Retry_v1_Key
 		nonce = Retry_v1_Nonce
-	case:
-		return nil, nil
 	}
-
-	// FIXME: we should just encrypt in place
-	cipher_text := make([]u8, len(payload))
-	tag := make([]u8, len(iv))
 
 	// let's encrypt!
 	encrypt_payload(key, iv, nonce, header, payload, algo, cipher_text, tag)
-
-	return cipher_text, tag
 }
 
 encrypt_payload :: proc(

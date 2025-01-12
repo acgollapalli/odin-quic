@@ -143,3 +143,14 @@ make_packet :: proc(
 	)
 	return 0
 }
+
+make_retry_pseudo_packet :: proc(p: Retry_Packet, header: []u8, payload: []u8, alloc := context.temp_allocator) -> (pseudo_packet: [dynamic]u8) {
+	pseudo_packet = make([dynamic]u8, alloc)
+
+	append(&pseudo_packet, u8(len(p.original_dest_conn_id)))
+	append(&pseudo_packet, ..p.original_dest_conn_id)
+	append(&pseudo_packet, ..header)
+	append(&pseudo_packet, ..payload)
+
+	return
+}

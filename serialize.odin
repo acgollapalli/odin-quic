@@ -1,182 +1,206 @@
 /*
- * SDG                                                                         JJ
- */
+
+SDG                                                                           JJ
+
+                                  Packet Serialization
+
+*/
 
 package quic
 
 import ssl "../ssl"
+import "core:fmt"
+import "core:sync"
 
-serialize_packet :: proc(conn: ^Conn, packet: Packet) -> []u8 {
-	out: [dynamic]u8
-	append(&out, 0) // placeholder first byte
-	append(&out, ..serialize_header(packet))
-	out[0] = make_first_byte(packet)
-
-	pkt_number_index := serialize_payload(conn, packet, &out)
-
-	apply_header_protection(conn, &out, packet, pkt_number_index)
-
-
-	return out[:]
-}
-
-// header
-// includes version, destination connection id + length source id + length
-serialize_header :: proc(packet: Packet) -> []u8 {
-	header: [dynamic]u8
-
-	switch p in packet { 	// FIXME: Holy code duplication batman!
-	case One_RTT_Packet:
-		for b in p.dest_conn_id do append(&header, b)
-		return header[0:len(p.dest_conn_id) + 1]
-	case Version_Negotiation_Packet:
-		append(&header, ..[]u8{0, 0, 0, 0})
-		append(&header, u8(len(p.dest_conn_id)))
-		for b in p.dest_conn_id do append(&header, b)
-		append(&header, u8(len(p.source_conn_id)))
-		for b in p.source_conn_id do append(&header, b)
-		len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-		return header[0:len]
-	case Initial_Packet:
-		for b in make_version(p.version) do append(&header, b)
-		append(&header, u8(len(p.dest_conn_id)))
-		for b in p.dest_conn_id do append(&header, b)
-		append(&header, u8(len(p.source_conn_id)))
-		for b in p.source_conn_id do append(&header, b)
-		len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-		return header[0:len]
-	case Zero_RTT_Packet:
-		for b in make_version(p.version) do append(&header, b)
-		append(&header, u8(len(p.dest_conn_id)))
-		for b in p.dest_conn_id do append(&header, b)
-		append(&header, u8(len(p.source_conn_id)))
-		for b in p.source_conn_id do append(&header, b)
-		len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-		return header[0:len]
-	case Handshake_Packet:
-		for b in make_version(p.version) do append(&header, b)
-		append(&header, u8(len(p.dest_conn_id)))
-		for b in p.dest_conn_id do append(&header, b)
-		append(&header, u8(len(p.source_conn_id)))
-		for b in p.source_conn_id do append(&header, b)
-		len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-		return header[0:len]
-	case Retry_Packet:
-		for b in make_version(p.version) do append(&header, b)
-		append(&header, u8(len(p.dest_conn_id)))
-		for b in p.dest_conn_id do append(&header, b)
-		append(&header, u8(len(p.source_conn_id)))
-		for b in p.source_conn_id do append(&header, b)
-		len := 3 + len(p.dest_conn_id) + len(p.source_conn_id)
-		return header[0:len]
-	}
-	return header[:]
-}
-
-serialize_payload :: proc(
+// expects two byte arrays currently, one for the header and one for the payload
+// it's expressed as a slice of slices for abi purposes
+serialize_packet :: proc(
 	conn: ^Conn,
 	packet: Packet,
-	out: ^[dynamic]u8,
-) -> int {
-	payload_buf := make([]u8, 600) // FIXME: we shouldn't be using dynamics or doing this
-	payload_buf = payload_buf[:0]
-	defer delete(payload_buf)
+	out: [][]u8,
+	arena_alloc := context.temp_allocator
+) -> (
+	bytes_written: int,
+) {
+	defer free_all(arena_alloc)
+
+	bytes_written = len(out[0]) + len(out[1])
+	header_cursor, payload_cursor := out[0][1:], out[1][:]
+	defer bytes_written -= (len(header_cursor) + len(payload_cursor))
+
+	out[0][0] = make_first_byte(packet)
+	payload_len := serialize_payload(packet, &payload_cursor)
+	header_len, pn_len := serialize_header(conn, packet, payload_len, &header_cursor)
+
+	header, payload := out[0][:header_len], out[1][:payload_len]
+
+	apply_packet_protection(conn, header, payload, packet, &payload_cursor)
+	apply_header_protection(conn, header, payload, pn_len, packet)
+
+	return 
+}
+
+// do this first so you can get the payload length
+serialize_payload :: proc(
+	packet: Packet,
+	cursor: ^[]u8,
+) -> (
+	bytes_written: int,
+) {
+	bytes_written = len(cursor)
+	defer bytes_written -= len(cursor)
+	
+	// odinfmt:disable
 	switch p in packet {
-	case One_RTT_Packet:
-		payload, tag := protect_payload(
-			conn,
-			p,
-			out[:],
-			serialize_frames(&payload_buf, p.packet_payload),
-		)
-		append(out, ..payload)
-		append(out, ..tag)
-		return 0
+	case One_RTT_Packet:    serialize_frames(p.packet_payload, cursor)
+	case Initial_Packet:    serialize_frames(p.packet_payload, cursor)
+	case Zero_RTT_Packet:   serialize_frames(p.packet_payload, cursor)
+	case Handshake_Packet:  serialize_frames(p.packet_payload, cursor)
+	case Retry_Packet: 		cursor_append(p.retry_token, cursor)
 	case Version_Negotiation_Packet:
 		for v, i in p.supported_versions {
 			idx := i * 4
-			version := out[idx:idx + 4]
-			make_version_bytes(v, &version)
-			append(out, ..version)
+			make_version_bytes(v, cursor)
+			cursor^ = cursor[4:] // versions are always 4 bytes
 		}
-		return 0
-	case Initial_Packet:
-		token_len := make_variable_length_int(len(p.token))
-		payload_len := make_variable_length_int(len(p.packet_payload))
-		packet_number := make_packet_number(p.packet_number)
-
-		append(out, ..token_len)
-		append(out, ..p.token)
-		append(out, ..payload_len)
-
-		pkt_number_idx := len(out)
-		append(out, ..packet_number)
-
-		payload, tag := protect_payload(
-			conn,
-			p,
-			out[:],
-			serialize_frames(&payload_buf, p.packet_payload),
-		)
-		append(out, ..payload)
-		append(out, ..tag)
-
-		return pkt_number_idx
-	case Zero_RTT_Packet:
-		packet_number := make_packet_number(p.packet_number)
-		payload_len := make_variable_length_int(len(p.packet_payload))
-
-		append(out, ..payload_len)
-
-		pkt_number_idx := len(out)
-		append(out, ..packet_number)
-
-		payload, tag := protect_payload(
-			conn,
-			p,
-			out[:],
-			serialize_frames(&payload_buf, p.packet_payload),
-		)
-		append(out, ..payload)
-		append(out, ..tag)
-
-		return pkt_number_idx
-	case Handshake_Packet:
-		packet_number := make_packet_number(p.packet_number)
-		payload_len := make_variable_length_int(len(p.packet_payload))
-
-		append(out, ..payload_len)
-		pkt_number_idx := len(out)
-
-		append(out, ..packet_number)
-		payload, tag := protect_payload(
-			conn,
-			p,
-			out[:],
-			serialize_frames(&payload_buf, p.packet_payload),
-		)
-
-		append(out, ..payload)
-		append(out, ..tag)
-		return pkt_number_idx
-	case Retry_Packet:
-		append(out, ..p.retry_token)
-
-		// constructing pseudo packet
-		pseudo_packet := make([dynamic]u8)
-		append(&pseudo_packet, u8(len(p.original_dest_conn_id)))
-		append(&pseudo_packet, ..p.original_dest_conn_id)
-
-		// getting the retry integrity tag
-		_, tag := protect_payload(conn, p, pseudo_packet[:], payload_buf)
-
-		delete(pseudo_packet) // cleanup
-
-		append(out, ..tag)
-
-		return 0
 	}
-	return 0 // will nver hit this, but the compiler complains
+	// odinfmt:enable
+	return
+}
+
+// header
+// everything up to and including the packet_number
+serialize_header :: proc(
+	conn: ^Conn,
+	packet: Packet,
+	payload_len: int,
+	cursor: ^[]u8,
+) -> (
+	bytes_written: int,
+	pn_len: int,
+) {
+	bytes_written = len(cursor)
+	defer bytes_written -= len(cursor)
+	
+	// odinfmt:disable
+	switch p in packet { 	// FIXME: Holy code duplication batman!
+	case Version_Negotiation_Packet:
+		cursor_append				 	([]u8{0, 0, 0, 0}, cursor)
+		cursor_append_one			 	(u8(len(p.dest_conn_id)), cursor)
+		cursor_append				 	(p.dest_conn_id, cursor)
+		cursor_append_one			 	(u8(len(p.source_conn_id)), cursor)
+		cursor_append				 	(p.source_conn_id, cursor)
+	case Initial_Packet:
+		cursor_append				 	(make_version(p.version), cursor)
+		cursor_append_one			 	(u8(len(p.dest_conn_id)), cursor)
+		cursor_append				 	(p.dest_conn_id, cursor)
+		cursor_append_one			 	(u8(len(p.source_conn_id)), cursor)
+		cursor_append				 	(p.source_conn_id, cursor)
+		encode_and_cursor_append_int 	(len(p.token), cursor)
+		cursor_append                	(p.token, cursor)
+		encode_and_cursor_append_int 	(payload_len, cursor)
+
+		pn_len = encode_and_cursor_append_pn(conn, p.packet_number, .Initial, cursor)
+	case Handshake_Packet:
+		cursor_append 				 	(make_version(p.version), cursor)
+		cursor_append_one 			 	(u8(len(p.dest_conn_id)), cursor)
+		cursor_append 				 	(p.dest_conn_id, cursor)
+		cursor_append_one 			 	(u8(len(p.source_conn_id)), cursor)
+		cursor_append 				 	(p.source_conn_id, cursor)
+		encode_and_cursor_append_int 	(payload_len, cursor)
+
+		pn_len = encode_and_cursor_append_pn(conn, p.packet_number, .Handshake, cursor)
+	case Zero_RTT_Packet:
+		cursor_append 				 	(make_version(p.version), cursor)
+		cursor_append_one 			 	(u8(len(p.dest_conn_id)), cursor)
+		cursor_append 				 	(p.dest_conn_id, cursor)
+		cursor_append_one 			 	(u8(len(p.source_conn_id)), cursor)
+		cursor_append 				 	(p.source_conn_id, cursor)
+		encode_and_cursor_append_int 	(payload_len, cursor)
+
+		pn_len = encode_and_cursor_append_pn(conn, p.packet_number, .Application, cursor)
+	case One_RTT_Packet:
+		cursor_append				 	(p.dest_conn_id, cursor)
+
+		pn_len = encode_and_cursor_append_pn(conn, p.packet_number, .Application, cursor)
+	case Retry_Packet:
+		cursor_append 					(make_version(p.version), cursor)
+		cursor_append_one 				(u8(len(p.dest_conn_id)), cursor)
+		cursor_append 					(p.dest_conn_id, cursor)
+		cursor_append_one 				(u8(len(p.source_conn_id)), cursor)
+		cursor_append 					(p.source_conn_id, cursor)
+	}
+	// odinfmt:enable
+	return
+}
+
+apply_packet_protection :: proc(
+	conn: ^Conn,
+	header: []u8,
+	payload: []u8,
+	packet: Packet,
+	cursor: ^[]u8,
+) {
+	_, is_version_negotiation := packet.(Version_Negotiation_Packet)
+	if !is_version_negotiation {
+		aead_tag := cursor[:16]
+		defer cursor^ = cursor[16:] // decrement cursor for encryption tag
+		
+			// odinfmt:disable
+		#partial switch p in packet {
+			case Initial_Packet:   protect_payload(conn, packet, header, payload, payload, aead_tag)
+			case Handshake_Packet: protect_payload(conn, packet, header, payload, payload, aead_tag) 
+			case Zero_RTT_Packet:  protect_payload(conn, packet, header, payload, payload, aead_tag) 
+			case One_RTT_Packet:   protect_payload(conn, packet, header, payload, payload, aead_tag) 
+			case Retry_Packet:
+			pseud := make_retry_pseudo_packet(p, header, payload, context.temp_allocator)[:]
+				protect_payload(conn, packet, pseud, nil, nil, aead_tag)
+		}
+		// odinfmt:enable
+	}
+}
+
+get_encryption_level :: proc(
+	packet: Packet,
+) -> (
+	level: ssl.QUIC_Encryption_Level,
+	ok: bool,
+) {
+	// odinfmt:disable
+	#partial switch p in packet {
+	case Initial_Packet: 	level = .Initial_Encryption
+	case Zero_RTT_Packet: 	level = .Early_Data_Encryption
+	case Handshake_Packet: 	level = .Handshake_Encryption
+	case One_RTT_Packet: 	level = .Application_Encryption
+	case: 					return
+	}
+	// odinfmt:enable
+
+	ok = true
+	return
+}
+
+apply_header_protection :: proc(
+	conn: ^Conn,
+	header: []u8,
+	payload: []u8,
+	pn_len: int,
+	packet: Packet,
+) {
+	level, has_level := get_encryption_level(packet)
+	if !has_level do return
+	
+	hp_key := get_hp_key(conn, level, .Write)
+
+	sample_offset := 4 - pn_len
+	sample := payload[sample_offset:][:20]
+	mask, m_ok := get_header_mask(sample, conn, level, .Write)
+	assert(m_ok, "could not get header mask when serializing")
+
+	packet_number_bytes := header[len(header) - pn_len:]
+	assert(len(packet_number_bytes) == pn_len, "bad packet_number offset")
+
+	add_header_protection(header[0], packet_number_bytes, mask)
 }
 
 make_version_bytes :: proc(version: u32, out: ^[]u8) {
@@ -188,7 +212,7 @@ make_version_bytes :: proc(version: u32, out: ^[]u8) {
 
 // FIXME: when we write the zero-copy version, this should go away
 make_version :: proc(version: u32) -> []u8 {
-	out := make([]u8, 4)
+	out := make([]u8, 4, context.temp_allocator)
 	make_version_bytes(version, &out)
 	return out
 }
@@ -232,7 +256,7 @@ make_first_byte :: proc(packet_untyped: Packet) -> u8 {
 		packet_number_length := u8(len(make_packet_number(packet.packet_number)))
 		return fixed_bit | spin_bit | key_phase | (packet_number_length - 1)
 	}
-	return 0 // unreachable (but compiler)
+	return 0
 }
 
 make_variable_length_int :: proc(
@@ -241,7 +265,7 @@ make_variable_length_int :: proc(
 	[]u8,
 	bool,
 ) #optional_ok {
-	out_a := make([]u8, 8)
+	out_a := make([]u8, 8, context.temp_allocator)
 
 	//n : u64
 	for k: u8 = 0; k < 8; k += 1 {
@@ -266,110 +290,31 @@ make_variable_length_int :: proc(
 }
 
 
-apply_header_protection :: proc(
+
+encode_and_cursor_append_pn :: proc(
 	conn: ^Conn,
-	packet: ^[dynamic]u8,
-	pkt_obj: Packet,
-	pkt_number_index: int,
+	#any_int packet_number: u64, // FIXME: packets should store the u64
+	pn_space: Packet_Number_Space,
+	cursor: ^[]u8,
+) -> (pn_len: int) {
+	largest_acked: u64
+	{
+		sync.guard(&conn.acks[pn_space].lock)
+		largest_acked = conn.acks[pn_space].largest_acked
+	}
+
+	// TODO: switch packet numbers to storing u64s
+	packet_number_bytes := encode_packet_number(packet_number, largest_acked)
+	cursor_append(packet_number_bytes, cursor)
+	return len(packet_number_bytes)
+}
+
+encode_and_cursor_append_int :: proc(
+	#any_int n: u64,
+	cursor: ^[]u8,
+) -> (
+	bytes_written: int,
 ) {
-	packet_number_length: int
-	switch packet[0] | 0x03 {
-	case 0x00:
-		packet_number_length = 1
-	case 0x01:
-		packet_number_length = 2
-	case 0x02:
-		packet_number_length = 4
-	case 0x03:
-		packet_number_length = 8
-	}
-	encryption_level: ssl.QUIC_Encryption_Level
-	#partial switch p in pkt_obj {
-	case Initial_Packet:
-		encryption_level = .Initial_Encryption
-	case Zero_RTT_Packet:
-		encryption_level = .Early_Data_Encryption
-	case Handshake_Packet:
-		encryption_level = .Handshake_Encryption
-	case One_RTT_Packet:
-		encryption_level = .Application_Encryption
-	case:
-		return
-	}
-
-	hp_key := get_hp_key(conn, encryption_level, .Write)
-	mask,m_ok := get_header_mask(
-		packet[pkt_number_index + 4:pkt_number_index + 20],
-		conn,
-		encryption_level,
-		Secret_Role.Write,
-	)
-	assert(m_ok, "could not get header mask when serializing")
-
-	packet_number_bytes := packet[pkt_number_index:pkt_number_index +
-	packet_number_length]
-
-	packet[0], packet_number_bytes = add_header_protection(
-		packet[0],
-		packet_number_bytes,
-		mask,
-	)
-}
-
-/*
- *  explicit mutation of payload slice for the sake of convenience 
- *  when serializing frames
- */
-increment_payload :: proc(payload: ^[]u8, #any_int increment: int) {
-	payload^ = payload[0:len(payload) + increment]
-}
-
-
-/*
- *  A way to do a variable length int that implies a single buffer
- *  we skip an allocation this way, but if you use an arena, it may not
- *  be any faster.
- */
-add_variable_length_int :: proc(out: ^[]u8, #any_int i: u64) -> bool {
-	k: u8
-	mask: u8
-
-	// find length and mask of variable length int
-	switch {
-	case i < 64:
-		k = 1
-	case i < 16384:
-		k = 2
-		mask = (1 << 6)
-	case i < 1073741824:
-		k = 4
-		mask = (2 << 6)
-	case i < 4611686018427387904:
-		k = 8
-		mask = (3 << 6)
-	case:
-		return false
-
-	}
-
-	// make space for it in the payload slice
-	increment_payload(out, k)
-
-	// add the variable to the slice
-	for j: u8 = 1; k <= j; j += 1 {
-		out^[len(out) - int(j)] = u8(i >> (8 * (j - 1)))
-	}
-
-	// add the mask to the first byte of our variable length int
-	out^[len(out) - int(k)] |= mask
-	return true
-}
-
-add_bytes :: proc(payload: ^[]u8, bytes: []u8) {
-	idx := len(payload)
-	increment_payload(payload, len(bytes))
-
-	for b, i in bytes { 	// FIXME: Is this the kind of thing you can do with SIMD?
-		payload^[idx + i] = b
-	}
+	n_encoded := make_variable_length_int(n)
+	return cursor_append(n_encoded, cursor)
 }

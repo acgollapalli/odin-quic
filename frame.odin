@@ -99,8 +99,8 @@ Padding_Frame :: struct {
 } //type: int = 0 `serialize:"variable_length_int"`,
 
 
-add_padding_frame :: proc(payload: ^[]u8, _: Padding_Frame) {
-	add_variable_length_int(payload, 0x00)
+add_padding_frame :: proc(_: Padding_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x00, cursor)
 }
 
 Ping_Frame :: struct {
@@ -108,8 +108,8 @@ Ping_Frame :: struct {
 } //type: int = 1 `serialize:"variable_length_int"`,
 
 
-add_ping_frame :: proc(payload: ^[]u8, _: Ping_Frame) {
-	add_variable_length_int(payload, 0x01)
+add_ping_frame :: proc(_: Ping_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x01, cursor)
 }
 
 // MAYBE: we MIGHT want to do some polymorphism here...
@@ -130,18 +130,18 @@ Ack_Frame :: struct {
 	using frame:     Frame,
 }
 
-add_ack_frame :: proc(payload: ^[]u8, frame: Ack_Frame) {
-	add_variable_length_int(payload, 0x03) // frame type
-	add_variable_length_int(payload, frame.largest_ack)
-	add_variable_length_int(payload, frame.ack_delay)
-	add_variable_length_int(payload, len(frame.ack_ranges) / 2) // ack_range_count
-	add_variable_length_int(payload, frame.first_ack_range)
-	for i in frame.ack_ranges do add_variable_length_int(payload, i)
+add_ack_frame :: proc(frame: Ack_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x03, cursor) // frame type
+	encode_and_cursor_append_int(frame.largest_ack, cursor)
+	encode_and_cursor_append_int(frame.ack_delay, cursor)
+	encode_and_cursor_append_int(len(frame.ack_ranges) / 2, cursor) // ack_range_count
+	encode_and_cursor_append_int(frame.first_ack_range, cursor)
+	for i in frame.ack_ranges do encode_and_cursor_append_int(i, cursor)
 
 	if frame.has_ecn_counts {
-		add_variable_length_int(payload, frame.ecn_counts.ect0_count)
-		add_variable_length_int(payload, frame.ecn_counts.ect1_count)
-		add_variable_length_int(payload, frame.ecn_counts.ecn_ce_count)
+		encode_and_cursor_append_int(frame.ecn_counts.ect0_count, cursor)
+		encode_and_cursor_append_int(frame.ecn_counts.ect1_count, cursor)
+		encode_and_cursor_append_int(frame.ecn_counts.ecn_ce_count, cursor)
 	}
 }
 
@@ -153,11 +153,11 @@ Reset_Stream_Frame :: struct {
 	using frame:    Frame,
 }
 
-add_reset_stream_frame :: proc(payload: ^[]u8, frame: Reset_Stream_Frame) {
-	add_variable_length_int(payload, 0x04) // frame type
-	add_variable_length_int(payload, frame.stream_id)
-	add_variable_length_int(payload, frame.app_error_code)
-	add_variable_length_int(payload, frame.final_size)
+add_reset_stream_frame :: proc(frame: Reset_Stream_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x04, cursor) // frame type
+	encode_and_cursor_append_int(frame.stream_id, cursor)
+	encode_and_cursor_append_int(frame.app_error_code, cursor)
+	encode_and_cursor_append_int(frame.final_size, cursor)
 }
 
 Stop_Sending_Frame :: struct {
@@ -167,10 +167,10 @@ Stop_Sending_Frame :: struct {
 	using frame:    Frame,
 }
 
-add_stop_sending_frame :: proc(payload: ^[]u8, frame: Stop_Sending_Frame) {
-	add_variable_length_int(payload, 0x05) // frame type
-	add_variable_length_int(payload, frame.stream_id)
-	add_variable_length_int(payload, frame.app_error_code)
+add_stop_sending_frame :: proc(frame: Stop_Sending_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x05, cursor) // frame type
+	encode_and_cursor_append_int(frame.stream_id, cursor)
+	encode_and_cursor_append_int(frame.app_error_code, cursor)
 }
 
 Crypto_Frame :: struct {
@@ -181,11 +181,11 @@ Crypto_Frame :: struct {
 	using frame: Frame,
 }
 
-add_crypto_frame :: proc(payload: ^[]u8, frame: Crypto_Frame) {
-	add_variable_length_int(payload, 0x06) // frame type
-	add_variable_length_int(payload, frame.offset)
-	add_variable_length_int(payload, len(frame.crypto_data))
-	add_bytes(payload, frame.crypto_data)
+add_crypto_frame :: proc(frame: Crypto_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x06, cursor) // frame type
+	encode_and_cursor_append_int(frame.offset, cursor)
+	encode_and_cursor_append_int(len(frame.crypto_data), cursor)
+	cursor_append(frame.crypto_data, cursor)
 }
 
 // server only
@@ -196,10 +196,10 @@ New_Token_Frame :: struct {
 	using frame: Frame,
 }
 
-add_new_token_frame :: proc(payload: ^[]u8, frame: New_Token_Frame) {
-	add_variable_length_int(payload, 0x07) // frame type
-	add_variable_length_int(payload, len(frame.token)) // token length
-	add_bytes(payload, frame.token)
+add_new_token_frame :: proc(frame: New_Token_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x07, cursor) // frame type
+	encode_and_cursor_append_int(len(frame.token), cursor) // token length
+	cursor_append(frame.token, cursor)
 }
 
 // the type on this has bit fields
@@ -215,18 +215,18 @@ Stream_Frame :: struct {
 	using frame: Frame,
 }
 
-add_stream_frame :: proc(payload: ^[]u8, frame: Stream_Frame) {
+add_stream_frame :: proc(frame: Stream_Frame, cursor: ^[]u8) {
 	type := 0x08
 
 	if frame.has_offset do type |= 0x04
 	if frame.has_len do type |= 0x02
 	if frame.fin_bit do type |= 0x01
 
-	add_variable_length_int(payload, type)
-	add_variable_length_int(payload, frame.stream_id)
-	add_variable_length_int(payload, frame.offset)
-	if frame.has_len do add_variable_length_int(payload, len(frame.stream_data))
-	add_bytes(payload, frame.stream_data)
+	encode_and_cursor_append_int(type, cursor)
+	encode_and_cursor_append_int(frame.stream_id, cursor)
+	encode_and_cursor_append_int(frame.offset, cursor)
+	if frame.has_len do encode_and_cursor_append_int(len(frame.stream_data), cursor)
+	cursor_append(frame.stream_data, cursor)
 }
 
 Max_Data_Frame :: struct {
@@ -235,9 +235,9 @@ Max_Data_Frame :: struct {
 	using frame: Frame,
 }
 
-add_max_data_frame :: proc(payload: ^[]u8, frame: Max_Data_Frame) {
-	add_variable_length_int(payload, 0x10) // frame type
-	add_variable_length_int(payload, frame.max_data)
+add_max_data_frame :: proc(frame: Max_Data_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x10, cursor) // frame type
+	encode_and_cursor_append_int(frame.max_data, cursor)
 }
 
 Max_Stream_Data_Frame :: struct {
@@ -248,12 +248,12 @@ Max_Stream_Data_Frame :: struct {
 }
 
 add_max_stream_data_frame :: proc(
-	payload: ^[]u8,
 	frame: Max_Stream_Data_Frame,
+	cursor: ^[]u8,
 ) {
-	add_variable_length_int(payload, 0x11) // frame type
-	add_variable_length_int(payload, frame.stream_id)
-	add_variable_length_int(payload, frame.max_stream_data)
+	encode_and_cursor_append_int(0x11, cursor) // frame type
+	encode_and_cursor_append_int(frame.stream_id, cursor)
+	encode_and_cursor_append_int(frame.max_stream_data, cursor)
 }
 
 
@@ -264,11 +264,11 @@ Max_Streams_Frame :: struct {
 	using frame: Frame,
 }
 
-add_max_streams_frame :: proc(payload: ^[]u8, frame: Max_Streams_Frame) {
+add_max_streams_frame :: proc(frame: Max_Streams_Frame, cursor: ^[]u8) {
 	type := 0x12
 	if frame.one_way do type += 1
-	add_variable_length_int(payload, type)
-	add_variable_length_int(payload, frame.max_streams)
+	encode_and_cursor_append_int(type, cursor)
+	encode_and_cursor_append_int(frame.max_streams, cursor)
 }
 
 Data_Blocked_Frame :: struct {
@@ -277,9 +277,9 @@ Data_Blocked_Frame :: struct {
 	using frame: Frame,
 }
 
-add_data_blocked_frame :: proc(payload: ^[]u8, frame: Data_Blocked_Frame) {
-	add_variable_length_int(payload, 0x14) // frame type
-	add_variable_length_int(payload, frame.max_data)
+add_data_blocked_frame :: proc(frame: Data_Blocked_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x14, cursor) // frame type
+	encode_and_cursor_append_int(frame.max_data, cursor)
 }
 
 Stream_Data_Blocked_Frame :: struct {
@@ -290,12 +290,12 @@ Stream_Data_Blocked_Frame :: struct {
 }
 
 add_stream_data_blocked_frame :: proc(
-	payload: ^[]u8,
 	frame: Stream_Data_Blocked_Frame,
+	cursor: ^[]u8,
 ) {
-	add_variable_length_int(payload, 0x15) // frame type
-	add_variable_length_int(payload, frame.stream_id)
-	add_variable_length_int(payload, frame.max_data)
+	encode_and_cursor_append_int(0x15, cursor) // frame type
+	encode_and_cursor_append_int(frame.stream_id, cursor)
+	encode_and_cursor_append_int(frame.max_data, cursor)
 }
 
 Streams_Blocked_Frame :: struct {
@@ -306,13 +306,13 @@ Streams_Blocked_Frame :: struct {
 }
 
 add_streams_blocked_frame :: proc(
-	payload: ^[]u8,
 	frame: Streams_Blocked_Frame,
+	cursor: ^[]u8,
 ) {
 	type := 0x16
 	if frame.one_way do type += 1
-	add_variable_length_int(payload, type)
-	add_variable_length_int(payload, frame.max_streams)
+	encode_and_cursor_append_int(type, cursor)
+	encode_and_cursor_append_int(frame.max_streams, cursor)
 }
 
 New_Connection_Id_Frame :: struct {
@@ -326,16 +326,16 @@ New_Connection_Id_Frame :: struct {
 }
 
 add_new_connection_id_frame :: proc(
-	payload: ^[]u8,
 	frame: New_Connection_Id_Frame,
+	cursor: ^[]u8,
 ) {
-	add_variable_length_int(payload, 0x18) // frame type
-	add_variable_length_int(payload, frame.sequence_num)
-	add_variable_length_int(payload, frame.retire_prior_to)
-	add_variable_length_int(payload, len(frame.connection_id)) // length of conn_id
-	add_bytes(payload, frame.connection_id)
+	encode_and_cursor_append_int(0x18, cursor) // frame type
+	encode_and_cursor_append_int(frame.sequence_num, cursor)
+	encode_and_cursor_append_int(frame.retire_prior_to, cursor)
+	encode_and_cursor_append_int(len(frame.connection_id), cursor) // length of conn_id
+	cursor_append(frame.connection_id, cursor)
 	token := frame.stateless_reset_token[:]
-	add_bytes(payload, token)
+	cursor_append(token, cursor)
 }
 
 Retire_Connection_Id_Frame :: struct {
@@ -345,11 +345,11 @@ Retire_Connection_Id_Frame :: struct {
 }
 
 add_retire_connection_id_frame :: proc(
-	payload: ^[]u8,
 	frame: Retire_Connection_Id_Frame,
+	cursor: ^[]u8,
 ) {
-	add_variable_length_int(payload, 0x19) // frame_type
-	add_variable_length_int(payload, frame.sequence_num)
+	encode_and_cursor_append_int(0x19, cursor) // frame_type
+	encode_and_cursor_append_int(frame.sequence_num, cursor)
 }
 
 Path_Challenge_Frame :: struct {
@@ -358,15 +358,12 @@ Path_Challenge_Frame :: struct {
 	using frame: Frame,
 }
 
-add_path_challenge_frame :: proc(payload: ^[]u8, frame: Path_Challenge_Frame) {
-	add_variable_length_int(payload, 0x1a) // frame type
-	len_payload := len(payload)
+add_path_challenge_frame :: proc(frame: Path_Challenge_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x1a, cursor) // frame type
 
 	// add entropy
-	increment_payload(payload, 8)
-	for i := 0; i < 8; i += 1 {
-		payload^[len_payload + i] = u8(frame.data >> u64((7 - i) * 8))
-	}
+	entropy_array := transmute([8]u8)frame.data
+	cursor_append(entropy_array[:], cursor)
 }
 
 Path_Response_Frame :: struct {
@@ -375,15 +372,12 @@ Path_Response_Frame :: struct {
 	using frame: Frame,
 }
 
-add_path_response_frame :: proc(payload: ^[]u8, frame: Path_Response_Frame) {
-	add_variable_length_int(payload, 0x1b) // frame type
-	len_payload := len(payload)
+add_path_response_frame :: proc(frame: Path_Response_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x1b, cursor) // frame type
 
 	// add entropy
-	increment_payload(payload, 8)
-	for i := 0; i < 8; i += 1 {
-		payload^[len_payload + i] = u8(frame.data >> u64((7 - i) * 8))
-	}
+	entropy_array := transmute([8]u8)frame.data
+	cursor_append(entropy_array[:], cursor)
 }
 
 Connection_Close_Frame :: struct {
@@ -397,24 +391,24 @@ Connection_Close_Frame :: struct {
 }
 
 add_connection_close_frame :: proc(
-	payload: ^[]u8,
 	frame: Connection_Close_Frame,
+	cursor: ^[]u8,
 ) {
 	type := 0x1c
 	if frame.is_app_error do type += 1
-	add_variable_length_int(payload, type)
-	if frame.is_app_error do add_variable_length_int(payload, frame.error_code)
-	add_variable_length_int(payload, frame.frame_type)
-	add_variable_length_int(payload, len(frame.reason_phrase))
-	add_bytes(payload, transmute([]u8)frame.reason_phrase)
+	encode_and_cursor_append_int(type, cursor)
+	if frame.is_app_error do encode_and_cursor_append_int(frame.error_code, cursor)
+	encode_and_cursor_append_int(frame.frame_type, cursor)
+	encode_and_cursor_append_int(len(frame.reason_phrase), cursor)
+	cursor_append(transmute([]u8)(frame.reason_phrase), cursor)
 }
 
 Handshake_Done_Frame :: struct {
 	using frame: Frame,
 } //type: int = 0x1e `serialize:"variable_length_int"`,
 
-add_handshake_done_frame :: proc(payload: ^[]u8, frame: Handshake_Done_Frame) {
-	add_variable_length_int(payload, 0x1e)
+add_handshake_done_frame :: proc(frame: Handshake_Done_Frame, cursor: ^[]u8) {
+	encode_and_cursor_append_int(0x1e, cursor)
 }
 Datagram_Frame :: struct {
 	//type: int = 0x30 `serialize:"variable_length_int"`,
@@ -423,11 +417,11 @@ Datagram_Frame :: struct {
 	using frame: Frame,
 }
 
-add_datagram_frame :: proc(payload: ^[]u8, frame: Datagram_Frame) {
+add_datagram_frame :: proc(frame: Datagram_Frame, cursor: ^[]u8) {
 	type := 0x30
 	if frame.has_len do type += 1
-	add_variable_length_int(payload, type)
+	encode_and_cursor_append_int(type, cursor)
 
-	if frame.has_len do add_variable_length_int(payload, len(frame.data))
-	add_bytes(payload, frame.data)
+	if frame.has_len do encode_and_cursor_append_int(len(frame.data), cursor)
+	cursor_append(frame.data, cursor)
 }

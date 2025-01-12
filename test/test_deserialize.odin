@@ -442,7 +442,7 @@ test_application_packet :: proc(t: ^testing.T) {
 	pkt_handshake_done_frame, handshake_done_ok := pkt_app.packet_payload[1].variant.(^quic.Handshake_Done_Frame)
 	pkt_stream_frame, stream_ok := pkt_app.packet_payload[2].variant.(^quic.Stream_Frame)
 
-	testing.expectf(t, ack_ok, "first frame was not an ack frame %v" )
+	testing.expectf(t, ack_ok, "first frame was not an ack frame")
 	testing.expectf(t, pkt_ack_frame.ack_delay == 0x12, "bad read of ack frame")
 
 	testing.expectf(t, handshake_done_ok, "second frame was not an handshake_done frame")
