@@ -90,9 +90,12 @@ test_serialize_initial_packet :: proc(t: ^testing.T) {
 
 
 	quic.init_quic_context({}, {send_limit = 2, role = .Client})
+	secrets := quic.determine_initial_secret(packet_st.dest_conn_id, .Client)
+	conn := quic.conn_create(secrets, net.Endpoint{})
+
 	out := [][]u8 {
 		make([]u8, 128),
-		make([]u8, 512),
+		make([]u8, 1200),
 	}
 	defer {
 		for buf in out {
@@ -100,12 +103,12 @@ test_serialize_initial_packet :: proc(t: ^testing.T) {
 		}
 	}
 
-	returned_packet := quic.serialize_packet(nil, packet_st, out)
+	returned_packet := quic.serialize_packet(conn, packet_st, out)
 
 	test_buf : [dynamic]u8; defer delete(test_buf)
 	for buf in out {
 		append(&test_buf, ..buf)
 	}
 	
-	expect_array_match(t, initial_packet, test_buf[:], "Crypto Data")
+	expect_array_match(t, test_buf[:], initial_packet, "packet data")
 }

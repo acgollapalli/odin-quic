@@ -9,6 +9,9 @@ SDG                                                                           JJ
 */
 package quic
 
+import "core:fmt"
+import "core:sync"
+
 cursor_append :: proc(data: []$T, cursor: ^[]T) -> (bytes_written: int) {
 	assert(len(data) <= len(cursor))
 
@@ -36,16 +39,16 @@ log2 :: proc(n: u64) -> (i: int) {
 encode_packet_number :: proc(
 	full_pn: u64,
 	largest_acked: u64,
+	alloc := context.temp_allocator
 ) -> (
 	truncated_pn: []u8,
 ) {
 	num_unacked := full_pn - largest_acked
-
 	min_bits := log2(num_unacked) + 1
 	num_bytes := (min_bits >> 3) + 1
 
 	// stack allocate our return value
-	truncated_pn = make([]u8, num_bytes, context.temp_allocator)
+	truncated_pn = make([]u8, num_bytes, alloc)
 
 	full_pn_arr := transmute([8]u8)full_pn
 	for i := 0; i < num_bytes; i += 1 {
@@ -53,6 +56,14 @@ encode_packet_number :: proc(
 	}
 
 	return truncated_pn
+}
+
+pn_largest_acked :: proc(conn: ^Conn, pn_space: Packet_Number_Space) -> (largest_acked: u64) {
+	{
+		sync.guard(&conn.acks[pn_space].lock)
+		largest_acked = conn.acks[pn_space].largest_acked
+	}
+	return
 }
 
 decode_packet_number :: proc(

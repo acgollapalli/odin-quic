@@ -1,8 +1,13 @@
 /*
- * SDG                                                                         JJ
- */
+
+SDG                                                                           JJ
+
+                                        Frames
+
+*/
 
 package quic
+import "core:fmt"
 
 Frame :: struct {
 	variant: union {

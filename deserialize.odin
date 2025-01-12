@@ -202,7 +202,9 @@ process_initial :: proc(
 	role: Role
 	secrets: [Secret_Role]TLS_Secret
 	hp_key: []byte
-	if conn, c_ok := find_conn(dest_conn_id); c_ok {
+	conn: ^Conn
+	c_ok: bool
+	if conn, c_ok = find_conn(dest_conn_id); c_ok {
 		sync.shared_guard(&conn.encryption.lock)
 		assert(
 			conn.encryption.secrets[.Initial_Encryption][.Read].valid,
@@ -235,14 +237,17 @@ process_initial :: proc(
 		packet[4:20],
 		Packet_Protection_Algorithm.AEAD_AES_128_GCM,
 	)
-	packet_number: u32
+	pn_truncated: u32
 	pn_len: int
-	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+	full_packet[0], pn_truncated, pn_len, packet = remove_header_protection(
 		first_byte,
 		packet,
 		mask,
 		true
 	)
+
+	largest_acked := pn_largest_acked(conn, .Initial) if c_ok else 0
+	packet_number := decode_packet_number(largest_acked, pn_truncated, pn_len)
 
 	// NOTE: header_length (for assocated data for decryption) includes the
 	// length of the packet number. However, the payload length field in the
@@ -307,14 +312,17 @@ process_handshake :: proc(
 	)
 	if !mask_ok do return // can't decrypt. We might not have keys yet.
 
-	packet_number: u32
+	pn_truncated: u32
 	pn_len: int
-	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+	full_packet[0], pn_truncated, pn_len, packet = remove_header_protection(
 		first_byte,
 		packet,
 		mask,
 		true
 	)
+
+	largest_acked := pn_largest_acked(conn, .Handshake)
+	packet_number := decode_packet_number(largest_acked, pn_truncated, pn_len)
 
 	payload := packet[:int(payload_length) - pn_len]
 	header_length := len(full_packet) + pn_len - int(payload_length)
@@ -423,15 +431,17 @@ process_zero_rtt :: proc(
 	)
 	if !mask_ok do return
 
-	packet_number: u32
+	pn_truncated: u32
 	pn_len: int
-	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+	full_packet[0], pn_truncated, pn_len, packet = remove_header_protection(
 		first_byte,
 		packet,
 		mask,
 		true
 	)
 
+	largest_acked := pn_largest_acked(conn, .Application)
+	packet_number := decode_packet_number(largest_acked, pn_truncated, pn_len)
 
 	payload := packet[:int(payload_length) - pn_len]
 	header_length := len(full_packet) + pn_len - int(payload_length)
@@ -485,14 +495,17 @@ process_one_rtt :: proc(
 	if !mask_ok do return
 
 	// removing packet protection
-	packet_number: u32
+	pn_truncated: u32
 	pn_len: int
-	full_packet[0], packet_number, pn_len, packet = remove_header_protection(
+	full_packet[0], pn_truncated, pn_len, packet = remove_header_protection(
 		first_byte,
 		packet,
 		mask,
 		true
 	)
+
+	largest_acked := pn_largest_acked(conn, .Application)
+	packet_number := decode_packet_number(largest_acked, pn_truncated, pn_len)
 
 	header_length := len(full_packet) - len(packet)
 	header := full_packet[:header_length]

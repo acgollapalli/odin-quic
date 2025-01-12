@@ -58,4 +58,5 @@ serialize_frames :: proc(frames: []^Frame, cursor: ^[]u8) {
 	for frame in frames {
 		serialize_frame(frame, cursor)
 	}
+	return
 }

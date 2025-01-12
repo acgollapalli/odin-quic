@@ -29,8 +29,12 @@ expect_array_match :: proc(t: ^testing.T, src, expected: []$T, $name: string) {
 	match := true
 	for i := 0; match && i < len(expected); i += 1 {
 		match &&= src[i] == expected[i]
+		if src[i] != expected[i] {
+			fmt.printfln("Failed to match on index: %v for value: %x, %x", i, src[i], expected[i])
+			break
+		}
 	}
-	testing.expectf(t, match, name + " does not match. %v vs %v", src, expected)
+	testing.expectf(t, match, name + " does not match. %x vs %x", src, expected)
 }
 
 

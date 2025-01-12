@@ -412,6 +412,7 @@ tlsv13_expand_label :: proc(
 // is completed via the Retry packet
 determine_initial_secret :: proc(
 	dest_conn_id: []byte,
+	role := Role.Server,
 	salt := Initial_v1_Salt,
 ) -> [Secret_Role]TLS_Secret {
 	// can you allocate multiple values at once this way?
@@ -426,7 +427,7 @@ determine_initial_secret :: proc(
 
 	server := tlsv13_expand_label(initial_secret[:], "server in", .SHA256, 32)
 	defer delete(server)
-	server_key := tlsv13_expand_label(client, "quic key", .SHA256, 16)
+	server_key := tlsv13_expand_label(server, "quic key", .SHA256, 16)
 	server_iv := tlsv13_expand_label(server, "quic iv", .SHA256, 12)
 	server_hp := tlsv13_expand_label(server, "quic hp", .SHA256, 16)
 
@@ -434,17 +435,30 @@ determine_initial_secret :: proc(
 
 	// only connections in the server role ever call this function
 	// so we know that .Read is the client secret
-	secret[.Read].key = client_key
-	secret[.Read].hp = client_hp
-	secret[.Read].iv = client_iv
-	secret[.Read].valid = true // maybe need to deprecate
-	secret[.Read].cipher = .AEAD_AES_128_GCM // always this for initial
+	client_st := TLS_Secret{
+		key = client_key,
+		hp = client_hp,
+		iv = client_iv,
+		valid = true, // maybe need to deprecate
+		cipher = .AEAD_AES_128_GCM // always this for initial
+	}
 
-	secret[.Write].key = server_key
-	secret[.Write].hp = server_hp
-	secret[.Write].iv = server_iv
-	secret[.Write].valid = true // maybe need to deprecate
-	secret[.Write].cipher = .AEAD_AES_128_GCM // always this for initial
+	server_st := TLS_Secret{
+		key = server_key,
+		hp = server_hp,
+		iv = server_iv,
+		valid = true, // maybe need to deprecate
+		cipher = .AEAD_AES_128_GCM, // always this for initial
+	}
+
+	switch role {
+	case .Server:
+		secret[.Read] = client_st
+		secret[.Write] = server_st
+	case .Client:
+		secret[.Read] = server_st
+		secret[.Write] = client_st
+	}
 
 	return secret
 }
@@ -485,13 +499,11 @@ protect_payload :: proc(
 	packet: Packet,
 	header: []u8,
 	payload: []u8,
-	cipher_text: []u8,
 	tag: []u8,
 ) {
 
 	// helper function to get the nonce
-	get_nonce :: proc(iv: []u8, packet_number: u32) -> []u8 {
-		assert(false, "This needs to use u64")
+	get_nonce :: proc(iv: []u8, packet_number: u64) -> []u8 {
 		nonce := make([]u8, len(iv))
 		for i: u8 = 0; i < 4; i += 1 {
 			nonce[len(iv) - 1 - int(i)] = u8(packet_number >> i * 8) // nonce is padded w/ zeroes 
@@ -507,27 +519,26 @@ protect_payload :: proc(
 	iv: []u8
 	nonce: []u8
 	algo: Packet_Protection_Algorithm
-	payload: []u8
 	#partial switch p in packet {
 	case Initial_Packet:
-		key, iv, algo := get_secret_iv_and_algo(conn, .Initial_Encryption, .Write)
+		key, iv, algo = get_secret_iv_and_algo(conn, .Initial_Encryption, .Write)
 		nonce = get_nonce(iv, p.packet_number)
 	case Zero_RTT_Packet:
-		key, iv, algo := get_secret_iv_and_algo(
+		key, iv, algo = get_secret_iv_and_algo(
 			conn,
 			.Early_Data_Encryption,
 			.Write,
 		)
 		nonce = get_nonce(iv, p.packet_number)
 	case Handshake_Packet:
-		key, iv, algo := get_secret_iv_and_algo(
+		key, iv, algo = get_secret_iv_and_algo(
 			conn,
 			.Handshake_Encryption,
 			.Write,
 		)
 		nonce = get_nonce(iv, p.packet_number)
 	case One_RTT_Packet:
-		key, iv, algo := get_secret_iv_and_algo(
+		key, iv, algo = get_secret_iv_and_algo(
 			conn,
 			.Application_Encryption,
 			.Write,
@@ -539,7 +550,7 @@ protect_payload :: proc(
 	}
 
 	// let's encrypt!
-	encrypt_payload(key, iv, nonce, header, payload, algo, cipher_text, tag)
+	encrypt_payload(key, iv, nonce, header, payload, algo, payload, tag)
 }
 
 encrypt_payload :: proc(
@@ -547,15 +558,17 @@ encrypt_payload :: proc(
 	algo: Packet_Protection_Algorithm,
 	cipher_text, tag: []u8,
 ) {
+	// TODO: XOR IV and NONCE HERE
+
 	switch algo {
 	case .AEAD_AES_128_GCM, .AEAD_AES_256_GCM:
 		ctx: aes.Context_GCM
 		aes.init_gcm(&ctx, key)
-		aes.seal_gcm(&ctx, cipher_text, tag, iv, associated_data, payload)
+		aes.seal_gcm(&ctx, cipher_text, tag, nonce, associated_data, payload)
 	case .AEAD_CHACHA20_POLY1305:
 		ctx: chacha_poly1305.Context
 		chacha_poly1305.init(&ctx, key)
-		chacha_poly1305.seal(&ctx, cipher_text, tag, iv, associated_data, payload)
+		chacha_poly1305.seal(&ctx, cipher_text, tag, nonce, associated_data, payload)
 	}
 }
 

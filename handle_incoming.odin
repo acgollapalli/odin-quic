@@ -133,7 +133,7 @@ handle_transport_error :: proc(conn: Maybe(^Conn), error: Transport_Error) {
 queue_ack :: proc(conn: ^Conn, packet: Packet, ack_eliciting: bool) {
 	assert(conn != nil, "Received nil conn")
 
-	pkt_number: u32
+	pkt_number: u64
 	pn_space: Packet_Number_Space
 
 	#partial switch p in packet {
