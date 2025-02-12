@@ -8,7 +8,16 @@ SDG                                                                           JJ
   it is designed to be scaled according to the users needs, and to scale up
   and down in accordance with the load at any point.
 
- */
+  In the future we may go purely even driven depending on how things go.
+  This is for the posix compliant implementation using sendmsg and recvmsg
+  on the sockets.
+
+  The Linux version will use io_uring and BSD's (including Mac) will use 
+  kqueues. But, all of that happens in NBIO (in http atm)
+
+*/
+
+#+build linux, darwin, freebsd, openbsd, netbsd
 
 package quic
 
@@ -38,7 +47,32 @@ ADDRESS :: #config(ADDRESS, "127.0.0.1")
 MAX_DGRAM_SIZE :: #config(MAX_DGRAM_SIZE, 4096)
 INIT_RECV_BUFS :: #config(INIT_RECV_BUFS, 100)
 IO_BUFS_LENGTH :: 100 // subject to change
-PACKETS_LENGTH :: 100
+PACKETS_LENGTH :: 100s
+
+sockaddr :: union { // TODO(caleb): not really necessary
+	posix.sockaddr,
+	posix.sockaddr_in,
+	posix.sockaddr_in6,
+}
+
+unwrap_sock_addr :: proc(addr: sockaddr) -> (endpoint: net.Endpoint) {
+	//	fmt.println("raw_data", transmute([110]u8)addr)
+	#partial switch addr.(posix.sockaddr).sa_family {
+	case .INET, .UNIX:
+		in_addr := addr.(posix.sockaddr_in)
+		return {
+			address = transmute(net.IP4_Address)(in_addr.sin_addr),
+			port = cast(int)in_addr.sin_port,
+		}
+	case .INET6:
+		in6_addr := addr.(posix.sockaddr_in6)
+		return {
+			port = cast(int)in6_addr.sin6_port,
+			address = transmute(net.IP6_Address)(in6_addr.sin6_addr),
+		}
+	}
+	return
+}
 
 /*
   TODO: Document
@@ -51,27 +85,13 @@ init_with_client_defaults :: proc(alloc := context.allocator) {
 	context.allocator = alloc
 }
 
-default_config :: Conn_Config {
-	send_limit    = 1 << 8, // number of bytes allowed through
-	receive_limit = 1 << 8, // number of bytes allowed through
-	version       = .QUICv1,
-	role          = .Server,
-	flow_enabled  = true,
-	spin_enabled  = true, // enables latency tracking in 1-rtt streams
-}
-
-init_runtime :: proc(
-	callbacks: Callbacks,
-	address := ADDRESS,
-	port := PORT,
-	config := default_config,
-) {
+init_runtime :: proc(callbacks: Callbacks, address := ADDRESS, port := PORT) {
 	address := net.parse_address(ADDRESS)
 	fmt.assertf(address != nil, "Error parsing connection params: %v", ADDRESS)
 
 	endpoint := net.Endpoint{address, PORT}
 
-	init_quic_context(callbacks, default_config)
+	init_quic_context(callbacks)
 
 	receive_thread := thread.create_and_start_with_poly_data(
 		&endpoint,

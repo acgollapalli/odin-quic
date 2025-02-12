@@ -32,7 +32,8 @@ SDG                                                                           JJ
   select a Role in the initialization function which will provide some
   sensible defaults.
 
-  Please note that the quic context is global. Please don't forget to shut
+  Please note that the quic context is global. Please don't forget to shut down
+  at the end of your program.
  */
 package quic
 
